@@ -50,13 +50,6 @@ module Ask
       def chown_state_dir(dir)
         fix(dir)
       end
-
-      # The LaunchDaemon plist root writes into /Library/LaunchDaemons:
-      # root-owned is correct there, but record it so `service status`
-      # can explain the split.
-      def chown_service_files(*paths)
-        fix(*paths)
-      end
     end
   end
 end

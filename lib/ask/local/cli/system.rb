@@ -169,20 +169,43 @@ module Ask
         # Re-execs under sudo; the proxy runs with the invoking user's state
         # dir so routes registered by unprivileged CLIs are shared
         # (portless pattern). A root proxy can also write /etc/hosts.
+        #
+        # Non-interactive runs (agents, CI) use `sudo -n`: never prompts,
+        # succeeds only when the scoped NOPASSWD grant from `ask-local
+        # sudoers` is installed, and fails fast with guidance otherwise.
+        # Interactive runs use plain sudo (one password, then the service
+        # is installed for good).
         def service_install(ctx, args)
           if !ProxyControl.root? && !args.include?("--internal")
             puts "Installing system service (sudo required)..."
             state = Certs.state_dir
-            ok = system("sudo", "env", "ASK_LOCAL_STATE_DIR=#{state}",
+            cmd = ["env", "ASK_LOCAL_STATE_DIR=#{state}",
               RbConfig.ruby, ProxyControl.bin_path,
-              "service", "install", "--internal")
+              "service", "install", "--internal"]
+            ok = elevate(cmd)
             exit(ok ? 0 : 1)
           end
           case RUBY_PLATFORM
           when /darwin/ then install_launchd(ctx)
-          when /linux/ then print_linux_unit
+          when /linux/ then install_systemd
           else raise Error, "Service install not supported on #{RUBY_PLATFORM}"
           end
+        end
+
+        # Run a privileged command via sudo. Interactive: plain sudo (one
+        # prompt). Non-interactive: `sudo -n` — no prompt ever; requires the
+        # NOPASSWD grant from `ask-local sudoers`. On failure prints the
+        # provisioning hint so agents/CI know exactly what to install.
+        def elevate(cmd)
+          interactive = $stdin.tty? && ENV["CI"].nil?
+          sudo_args = interactive ? ["sudo"] : ["sudo", "-n"]
+          ok = Command.run(*sudo_args, *cmd)
+          return true if ok
+
+          $stderr.puts "sudo failed — install the scoped grant once:"
+          $stderr.puts "  ask-local sudoers > /tmp/ask-local.sudoers"
+          $stderr.puts "  sudo install -o root -g wheel -m 440 /tmp/ask-local.sudoers /etc/sudoers.d/ask-local"
+          false
         end
 
         def user_home_for_service
@@ -228,9 +251,23 @@ module Ask
           path = File.join(dir, "dev.ask.local.plist")
           File.write(path, plist)
           File.chmod(0o644, path)
-          Ownership.chown_service_files(path)
+          # launchd requires /Library/LaunchDaemons plists to be
+          # root-owned; we are root here (sudo re-exec). Never hand the
+          # plist to the invoking user — bootstrap fails with error 5.
+          # Trust the CA into the System keychain while elevated: silent
+          # (no GUI popup) and trusted for every user on the machine.
+          ensure_system_ca_trust
           launchctl_bootstrap(path)
           puts "Installed root LaunchDaemon on port 443 (state: #{state_dir})."
+        end
+
+        # Root-only CA trust: the System keychain (all users, no prompt).
+        # Safe to call repeatedly — once the marker is set it is a no-op.
+        def ensure_system_ca_trust
+          return if Certs.trusted?(Certs.state_dir)
+
+          result = Trust.trust
+          warn "    CA trust warning: #{result[:error]}" unless result[:trusted]
         end
 
         # Modern launchctl system-domain verbs. The legacy `launchctl load`
@@ -240,22 +277,24 @@ module Ask
         # bootstrap/bootout are the supported verbs (same as puma-dev and
         # portless); extracted so the command sequence is unit-testable.
         def launchctl_bootstrap(path)
-          system("launchctl", "bootout", "system", path) # best-effort: not loaded yet is fine
-          unless system("launchctl", "bootstrap", "system", path)
+          Command.run("launchctl", "bootout", "system", path) # best-effort: not loaded yet is fine
+          unless Command.run("launchctl", "bootstrap", "system", path)
             raise Error, "launchctl bootstrap failed — check the plist at #{path}"
           end
-          system("launchctl", "enable", "system/dev.ask.local")
-          system("launchctl", "kickstart", "-k", "system/dev.ask.local")
+          Command.run("launchctl", "enable", "system/dev.ask.local")
+          Command.run("launchctl", "kickstart", "-k", "system/dev.ask.local")
         end
 
         def launchctl_bootout(path)
-          system("launchctl", "bootout", "system", path)
+          Command.run("launchctl", "bootout", "system", path)
         end
 
-        def print_linux_unit
+        # Pure unit-file builder (testable without root). Binds 80/443 at
+        # boot; the proxy runs with the invoking user's state dir.
+        def systemd_unit
           home = user_home_for_service
           state_dir = ENV["ASK_LOCAL_STATE_DIR"] || File.join(home, ".ask-local")
-          puts <<~UNIT
+          <<~UNIT
             # /etc/systemd/system/ask-local.service  (binds 80/443 at boot)
             [Unit]
             After=network.target
@@ -267,17 +306,27 @@ module Ask
 
             [Install]
             WantedBy=multi-user.target
-
-            Install with: sudo cp ask-local.service /etc/systemd/system/ && sudo systemctl enable --now ask-local
-            (Run that install command with sudo so the service is root-owned.)
           UNIT
+        end
+
+        # Install + start the systemd unit (mirrors portless). We are root
+        # here (sudo re-exec). The unit is written root-owned, then enabled
+        # and started.
+        def install_systemd
+          unit_path = "/etc/systemd/system/ask-local.service"
+          File.write(unit_path, systemd_unit)
+          File.chmod(0o644, unit_path)
+          Command.run("systemctl", "daemon-reload") or raise Error, "systemctl daemon-reload failed"
+          Command.run("systemctl", "enable", "--now", "ask-local") or raise Error, "systemctl enable failed"
+          puts "Installed systemd service ask-local on port 443."
         end
 
         def service_uninstall(_ctx)
           if !ProxyControl.root?
             state = Certs.state_dir
-            ok = system("sudo", "env", "ASK_LOCAL_STATE_DIR=#{state}",
-              RbConfig.ruby, ProxyControl.bin_path, "service", "uninstall", "--internal")
+            cmd = ["env", "ASK_LOCAL_STATE_DIR=#{state}",
+              RbConfig.ruby, ProxyControl.bin_path, "service", "uninstall", "--internal"]
+            ok = elevate(cmd)
             exit(ok ? 0 : 1)
           end
           case RUBY_PLATFORM
@@ -286,8 +335,13 @@ module Ask
             launchctl_bootout(path)
             FileUtils.rm_f(path)
             puts "Removed root LaunchDaemon."
+          when /linux/
+            Command.run("systemctl", "disable", "--now", "ask-local")
+            Command.run("systemctl", "daemon-reload")
+            FileUtils.rm_f("/etc/systemd/system/ask-local.service")
+            puts "Removed systemd service ask-local."
           else
-            puts "Remove /etc/systemd/system/ask-local.service, then: sudo systemctl disable --now ask-local"
+            raise Error, "Service uninstall not supported on #{RUBY_PLATFORM}"
           end
         end
 
@@ -375,44 +429,49 @@ module Ask
 
               One-shot workstation setup for clean https://<app>.localhost URLs:
 
-                1. Trust the local CA (no more browser warnings)
-                2. Serve port 443 (root service at boot, or sudo daemon now)
-                3. Sync /etc/hosts (Safari + custom TLDs)
-                4. Verify everything with doctor
+                Default: install the root proxy service on 443 — runs under
+                sudo ONCE, trusting the CA system-wide in the same step
+                (no separate GUI authorization popup).
+                --no-service: trust the CA at user level, then run a sudo
+                daemon instead (no boot persistence; ephemeral machines).
 
-              --no-service skips the root service and starts a sudo daemon
-              instead (no boot persistence; good for ephemeral machines).
+              Both finish by syncing /etc/hosts and verifying with doctor.
             HELP
             return
           end
 
-          step("1/4 Trusting local CA") do
-            result = Ask::Local::Trust.trust
-            unless result[:trusted]
-              abort_setup("CA trust failed: #{result[:error]}",
-                "Run `ask-local trust` manually to see the underlying error,",
-                "then re-run `ask-local setup`.")
-            end
-          end
+          no_service = args.include?("--no-service")
+          steps = no_service ? 4 : 3
 
-          unless args.include?("--no-service")
-            step("2/4 Installing proxy service on port 443") do
+          if no_service
+            step("1/#{steps} Trusting local CA") do
+              result = Ask::Local::Trust.trust
+              unless result[:trusted]
+                abort_setup("CA trust failed: #{result[:error]}",
+                  "Run `ask-local trust` manually to see the underlying error,",
+                  "then re-run `ask-local setup`.")
+              end
+            end
+            step("2/#{steps} Starting proxy sudo daemon on port 443") do
+              unless ensure_sudo_daemon(ctx)
+                abort_setup("Could not start the proxy daemon on port 443.",
+                  "Check the log, then re-run `ask-local setup`.")
+              end
+            end
+          else
+            step("1/#{steps} Installing proxy service on port 443 (trusts CA)") do
+              # Runs under sudo once; inside, the CA is trusted into the
+              # System keychain silently (no GUI popup) and the launchd
+              # service is bootstrapped. One password entry, that's all.
               unless ensure_root_service(ctx)
                 abort_setup("Could not install the proxy service.",
                   "Fallback: `ask-local setup --no-service` for a sudo daemon",
                   "without boot persistence.")
               end
             end
-          else
-            step("2/4 Starting proxy sudo daemon on port 443") do
-              unless ensure_sudo_daemon(ctx)
-                abort_setup("Could not start the proxy daemon on port 443.",
-                  "Check the log, then re-run `ask-local setup`.")
-              end
-            end
           end
 
-          step("3/4 Syncing /etc/hosts") do
+          step("#{no_service ? 3 : 2}/#{steps} Syncing /etc/hosts") do
             hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
             unless Ask::Local::Hosts.sync(hostnames)
               abort_setup("Could not write /etc/hosts.",
@@ -420,7 +479,7 @@ module Ask
             end
           end
 
-          step("4/4 Verifying with doctor") do
+          step("#{no_service ? 4 : 3}/#{steps} Verifying with doctor") do
             failed = Doctor.print(Doctor.run(store: ctx.store), out: $stdout)
             if failed.zero?
               puts "\nSetup complete: https://<app>.localhost URLs are ready."

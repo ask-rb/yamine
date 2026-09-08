@@ -76,12 +76,10 @@ class SudoersTest < Minitest::Test
 
   def test_non_interactive_setup_path_points_at_sudoers
     write_local_yml(@dir)
-    # A trusted CA is required to reach the proxy step of `setup`; mark it
-    # so step 1 is skipped and step 2 runs. --no-service uses the sudo
-    # daemon path (the root-service path re-execs sudo via system(), which
-    # is not capturable here); with no TTY it must point at the sudoers
-    # fix instead of hanging.
-    Ask::Local::Certs.stubs(:trusted?).returns(true)
+    # Stub the trust step so no real `security` command (and no keychain
+    # popup) runs; --no-service uses the sudo daemon path, and with no TTY
+    # it must point at the sudoers fix instead of hanging.
+    Ask::Local::Trust.stubs(:trust).returns({ trusted: true })
 
     code, _out, err = nil
     Dir.chdir(@dir) do
@@ -126,5 +124,150 @@ class LaunchctlVerbsTest < Minitest::Test
     assert bootout, "launchctl_bootout helper must exist"
     assert_includes bootout, '"launchctl", "bootout", "system"'
     refute_includes bootout, '"launchctl", "unload"'
+  end
+end
+
+class ServiceInstallFixesTest < Minitest::Test
+  # Regression set from live `ask-local setup` failures:
+  #  1. launchd rejected the plist with error 5 because install chowned it
+  #     to the invoking user — system-domain plists must stay root-owned.
+  #  2. CA trust should happen under elevation (System keychain, silent),
+  #     not as a separate user-level GUI popup.
+  #  3. Linux should actually install a systemd unit, not just print one.
+  def source
+    @source ||= File.read(File.join(__dir__, "..", "lib", "ask", "local", "cli", "system.rb"))
+  end
+
+  def test_install_launchd_keeps_plist_root_owned
+    install = source[/def install_launchd(.*?)^        end/m, 1]
+
+    assert_includes install, "launchctl_bootstrap(path)"
+    refute_includes install, "chown_service_files",
+      "chowning the plist to the invoking user makes launchd bootstrap fail with error 5"
+    refute_includes install, "Ownership.",
+      "install must not hand the /Library/LaunchDaemons plist to the invoking user"
+  end
+
+def test_setup_default_path_has_no_user_level_ca_popup
+  setup = source[/def setup\(ctx, args\)(.*?)^        end/m, 1]
+  # The default branch (else of --no-service) installs the root service,
+  # which trusts the CA under elevation — no separate user-level popup.
+  default_branch = setup[/^          else\n(.*?)^          end\n/m, 1]
+
+  assert default_branch, "default setup branch must exist"
+  assert_includes default_branch, "ensure_root_service",
+    "default setup must install the root service (which trusts CA under elevation)"
+  refute_includes default_branch, "Trust.trust",
+    "default setup must not trust the CA at user level (that is the GUI popup)"
+end
+
+  def test_setup_no_service_still_trusts_ca
+    setup = source[/def setup\(ctx, args\)(.*?)^        end/m, 1]
+    refute_nil setup[/no-service/]
+  end
+
+  def test_install_launchd_trusts_ca_while_elevated
+    install = source[/def install_launchd(.*?)^        end/m, 1]
+
+    assert_includes install, "ensure_system_ca_trust",
+      "the elevated install must trust the CA system-wide before bootstrap"
+  end
+
+  def test_system_ca_trust_uses_system_keychain
+    trust_source = File.read(File.join(__dir__, "..", "lib", "ask", "local", "trust.rb"))
+    macos = trust_source[/def trust_macos(.*?)^      end/m, 1]
+
+    assert_includes macos, "Process.uid.zero?"
+    assert_includes macos, "/Library/Keychains/System.keychain"
+    assert_includes macos, '"-d"'
+  end
+
+  def test_linux_installs_systemd_unit
+    assert_includes source, "def systemd_unit"
+    install = source[/def install_systemd(.*?)^        end/m, 1]
+
+    assert_includes install, "/etc/systemd/system/ask-local.service"
+    assert_includes install, '"systemctl", "enable", "--now", "ask-local"'
+  end
+
+  def test_linux_uninstall_disables_and_removes_unit
+    uninstall = source[/def service_uninstall(.*?)^        end/m, 1]
+    linux = uninstall[/when \/linux\/(.*?)^          else/m, 1]
+
+    assert_includes linux, '"systemctl", "disable", "--now", "ask-local"'
+    assert_includes linux, 'rm_f("/etc/systemd/system/ask-local.service")'
+  end
+end
+
+
+class ElevatePromptSafetyTest < Minitest::Test
+  # The elevation re-exec must never prompt for a password in tests or CI.
+  # Non-interactive runs use `sudo -n` (fails fast without the NOPASSWD
+  # grant), and all privileged execution goes through Command.run so tests
+  # stub it instead of shelling out to a real sudo/security/launchctl.
+  def setup
+    ENV["CI"] = "1"
+  end
+
+  def teardown
+    ENV.delete("CI")
+  end
+
+  def silently
+    orig_out, orig_err = $stdout, $stderr
+    $stdout, $stderr = StringIO.new, StringIO.new
+    code = begin
+      yield
+      0
+    rescue SystemExit => e
+      e.status
+    end
+    [code, $stdout.string, $stderr.string]
+  ensure
+    $stdout, $stderr = orig_out, orig_err
+  end
+
+  def test_non_interactive_elevate_uses_sudo_n
+    Ask::Local::Command.expects(:run)
+      .with("sudo", "-n", "env", "X=1", "cmd", "--internal")
+      .returns(false)
+
+    ok = nil
+    code, _out, err = silently { ok = Ask::Local::CLI::SystemCommand.elevate(["env", "X=1", "cmd", "--internal"]) }
+
+    assert_equal 0, code
+    refute ok, "non-interactive elevation without a grant must fail"
+    assert_includes err, "ask-local sudoers",
+      "the failure hint must name the NOPASSWD grant, not ask for a password"
+  end
+
+  def test_interactive_elevate_uses_plain_sudo
+    ENV.delete("CI")
+    $stdin.stubs(:tty?).returns(true)
+
+    Ask::Local::Command.expects(:run)
+      .with("sudo", "env", "X=1", "cmd", "--internal")
+      .returns(true)
+
+    ok = Ask::Local::CLI::SystemCommand.elevate(["env", "X=1", "cmd", "--internal"])
+    assert ok, "interactive elevation with a password available must succeed"
+  end
+
+  def test_service_install_elevates_through_command_not_bare_sudo
+    Ask::Local::ProxyControl.stubs(:root?).returns(false)
+    state = "/tmp/ask-local-state"
+    Ask::Local::Certs.stubs(:state_dir).returns(state)
+    ruby = RbConfig.ruby
+    bin = Ask::Local::ProxyControl.bin_path
+
+    Ask::Local::Command.expects(:run)
+      .with("sudo", "-n", "env", "ASK_LOCAL_STATE_DIR=#{state}", ruby, bin,
+        "service", "install", "--internal")
+      .returns(true)
+
+    code, out, = silently { Ask::Local::CLI::SystemCommand.service_install(Ask::Local::CLI::Context.new, []) }
+
+    assert_equal 0, code, "service install must exit 0 when the elevation succeeds"
+    assert_includes out, "Installing system service"
   end
 end

@@ -30,16 +30,15 @@ class SetupCommandTest < Minitest::Test
     $stdout, $stderr = orig_out, orig_err
   end
 
-  def test_help_lists_four_steps
+  def test_help_describes_default_and_no_service_paths
     _code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, ["--help"]) }
-    assert_includes out, "1. Trust the local CA"
-    assert_includes out, "2. Serve port 443"
-    assert_includes out, "3. Sync /etc/hosts"
-    assert_includes out, "4. Verify"
+    assert_includes out, "Default: install the root proxy service on 443"
+    assert_includes out, "--no-service"
+    assert_includes out, "syncing /etc/hosts"
+    assert_includes out, "doctor"
   end
 
   def test_full_run_with_stubbed_steps
-    Ask::Local::Trust.stubs(:trust).returns({ trusted: true })
     Ask::Local::CLI::SystemCommand.stubs(:ensure_root_service).returns(true)
     Ask::Local::Hosts.stubs(:sync).returns(true)
     Ask::Local::Doctor.stubs(:run).returns([])
@@ -47,10 +46,9 @@ class SetupCommandTest < Minitest::Test
 
     code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
     assert_equal 0, code
-    assert_includes out, "1/4 Trusting local CA"
-    assert_includes out, "2/4 Installing proxy service"
-    assert_includes out, "3/4 Syncing /etc/hosts"
-    assert_includes out, "4/4 Verifying with doctor"
+    assert_includes out, "1/3 Installing proxy service on port 443 (trusts CA)"
+    assert_includes out, "2/3 Syncing /etc/hosts"
+    assert_includes out, "3/3 Verifying with doctor"
     assert_includes out, "Setup complete"
   end
 
@@ -63,21 +61,34 @@ class SetupCommandTest < Minitest::Test
 
     code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, ["--no-service"]) }
     assert_equal 0, code
-    assert_includes out, "sudo daemon"
+    assert_includes out, "1/4 Trusting local CA"
+    assert_includes out, "2/4 Starting proxy sudo daemon on port 443"
+    assert_includes out, "3/4 Syncing /etc/hosts"
+    assert_includes out, "4/4 Verifying with doctor"
+    assert_includes out, "Setup complete"
   end
 
-  def test_first_failure_aborts_with_fix
-    Ask::Local::Trust.stubs(:trust).returns({ trusted: false, error: "nope" })
+  def test_root_service_failure_aborts_with_fallback
+    Ask::Local::CLI::SystemCommand.stubs(:ensure_root_service).returns(false)
 
     code, _out, err = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
     assert_equal 1, code
     assert_includes err, "Setup failed"
+    assert_includes err, "Could not install the proxy service"
+    assert_includes err, "--no-service"
+  end
+
+  def test_trust_failure_aborts_with_manual_fix
+    Ask::Local::Trust.stubs(:trust).returns({ trusted: false, error: "nope" })
+
+    code, _out, err = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, ["--no-service"]) }
+    assert_equal 1, code
+    assert_includes err, "Setup failed: CA trust failed: nope"
     assert_includes err, "ask-local trust"
     assert_includes err, "ask-local setup"
   end
 
   def test_doctor_failure_aborts_with_count
-    Ask::Local::Trust.stubs(:trust).returns({ trusted: true })
     Ask::Local::CLI::SystemCommand.stubs(:ensure_root_service).returns(true)
     Ask::Local::Hosts.stubs(:sync).returns(true)
     Ask::Local::Doctor.stubs(:run).returns([])

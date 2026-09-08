@@ -32,14 +32,24 @@ module Ask
       end
 
       def trust_macos(cert_path)
-        keychain = login_keychain
-        _out, status = Open3.capture2("security", "add-trusted-cert",
-          "-r", "trustRoot", "-k", keychain, cert_path)
-        raise CertError, "security add-trusted-cert failed" unless status.success?
+        if Process.uid.zero?
+          # Running elevated (service install / root proxy): add to the
+          # System keychain with the admin (-d) domain. Root can modify it
+          # silently — no GUI authorization popup, and every user's
+          # browsers trust the proxy.
+          _out, status = Command.capture2("security", "add-trusted-cert",
+            "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain", cert_path)
+          raise CertError, "security add-trusted-cert (system) failed" unless status.success?
+        else
+          keychain = login_keychain
+          _out, status = Command.capture2("security", "add-trusted-cert",
+            "-r", "trustRoot", "-k", keychain, cert_path)
+          raise CertError, "security add-trusted-cert failed" unless status.success?
+        end
       end
 
       def login_keychain
-        out, status = Open3.capture2("security", "default-keychain")
+        out, status = Command.capture2("security", "default-keychain")
         if status.success? && (m = out.match(/"(.+)"/))
           m[1]
         else
@@ -51,7 +61,7 @@ module Ask
         dest_dir, update_cmd = linux_ca_config
         FileUtils.mkdir_p(dest_dir)
         FileUtils.cp(cert_path, File.join(dest_dir, "ask-local-ca.crt"))
-        _out, status = Open3.capture2(update_cmd)
+        _out, status = Command.capture2(update_cmd)
         raise CertError, "#{update_cmd} failed" unless status.success?
       end
 
@@ -73,7 +83,7 @@ module Ask
       end
 
       def trust_windows(cert_path)
-        _out, status = Open3.capture2("certutil", "-addstore", "-user", "Root", cert_path)
+        _out, status = Command.capture2("certutil", "-addstore", "-user", "Root", cert_path)
         raise CertError, "certutil failed" unless status.success?
       end
 
@@ -86,12 +96,12 @@ module Ask
         errors = []
         case platform
         when :macos
-          Open3.capture2("security", "remove-trusted-cert", paths[:cert])
+          Command.capture2("security", "remove-trusted-cert", paths[:cert])
           # delete-certificate fails silently when no match remains; loop
           # to clear duplicate CN entries from each keychain.
           [login_keychain, "/Library/Keychains/System.keychain"].each do |kc|
             5.times do
-              Open3.capture2("security", "delete-certificate", "-c", Certs::CA_COMMON_NAME, kc)
+              Command.capture2("security", "delete-certificate", "-c", Certs::CA_COMMON_NAME, kc)
             end
           rescue SystemCallError
             nil
@@ -100,9 +110,9 @@ module Ask
           dest_dir, update_cmd = linux_ca_config
           dest = File.join(dest_dir, "ask-local-ca.crt")
           FileUtils.rm_f(dest) if File.file?(dest)
-          Open3.capture2(update_cmd)
+          Command.capture2(update_cmd)
         when :windows
-          Open3.capture2("certutil", "-delstore", "-user", "Root", Certs::CA_COMMON_NAME)
+          Command.capture2("certutil", "-delstore", "-user", "Root", Certs::CA_COMMON_NAME)
         end
         trusted_after = begin
           Certs.trusted?(dir)

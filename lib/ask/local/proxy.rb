@@ -64,6 +64,7 @@ module Ask
         servers.each { |s| s.listen(@port) }
         @port = servers.first.addr[1]
         Ownership.chown_state_dir(@store.dir)
+        ensure_system_ca_trust if Process.uid.zero?
         trap("INT") { stop(servers) }
         trap("TERM") do
           @supervisor&.shutdown
@@ -123,6 +124,16 @@ module Ask
       end
 
       private
+
+      # A root proxy (launchd service or sudo daemon) is the one process
+      # that can trust the CA into the System keychain silently — no GUI
+      # popup. Idempotent: the state-dir marker makes repeat boots a no-op.
+      def ensure_system_ca_trust
+        return if Certs.trusted?(@state_dir)
+
+        result = Trust.trust(@state_dir)
+        @on_error.call("CA trust warning: #{result[:error]}") unless result[:trusted]
+      end
 
       def admit?
         @inflight_mutex.synchronize do
