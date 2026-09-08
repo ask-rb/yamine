@@ -202,9 +202,17 @@ module Ask
           ok = Command.run(*sudo_args, *cmd)
           return true if ok
 
-          $stderr.puts "sudo failed — install the scoped grant once:"
-          $stderr.puts "  ask-local sudoers > /tmp/ask-local.sudoers"
-          $stderr.puts "  sudo install -o root -g wheel -m 440 /tmp/ask-local.sudoers /etc/sudoers.d/ask-local"
+          # An interactive sudo failure is auth or the elevated command
+          # itself (whose error is already on screen) — re-run and read it.
+          # The scoped-grant hint only helps passwordless non-interactive
+          # runs, where a missing NOPASSWD rule is the usual cause.
+          if interactive
+            $stderr.puts "sudo failed — re-run `ask-local setup` to try again."
+          else
+            $stderr.puts "sudo failed — install the scoped grant once:"
+            $stderr.puts "  ask-local sudoers > /tmp/ask-local.sudoers"
+            $stderr.puts "  sudo install -o root -g wheel -m 440 /tmp/ask-local.sudoers /etc/sudoers.d/ask-local"
+          end
           false
         end
 
@@ -252,10 +260,13 @@ module Ask
           File.write(path, plist)
           File.chmod(0o644, path)
           # launchd requires /Library/LaunchDaemons plists to be
-          # root-owned; we are root here (sudo re-exec). Never hand the
-          # plist to the invoking user — bootstrap fails with error 5.
+          # root-owned; we are root here (sudo re-exec). Enforce it
+          # explicitly: File.write keeps an existing file's owner, so a
+          # stale user-owned plist from an older version would otherwise
+          # survive the overwrite and bootstrap fails with error 5.
           # Trust the CA into the System keychain while elevated: silent
           # (no GUI popup) and trusted for every user on the machine.
+          File.chown(0, 0, path) if Process.uid.zero?
           ensure_system_ca_trust
           launchctl_bootstrap(path)
           puts "Installed root LaunchDaemon on port 443 (state: #{state_dir})."
@@ -316,6 +327,7 @@ module Ask
           unit_path = "/etc/systemd/system/ask-local.service"
           File.write(unit_path, systemd_unit)
           File.chmod(0o644, unit_path)
+          File.chown(0, 0, unit_path) if Process.uid.zero?
           Command.run("systemctl", "daemon-reload") or raise Error, "systemctl daemon-reload failed"
           Command.run("systemctl", "enable", "--now", "ask-local") or raise Error, "systemctl enable failed"
           puts "Installed systemd service ask-local on port 443."

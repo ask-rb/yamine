@@ -142,6 +142,8 @@ class ServiceInstallFixesTest < Minitest::Test
     install = source[/def install_launchd(.*?)^        end/m, 1]
 
     assert_includes install, "launchctl_bootstrap(path)"
+    assert_includes install, "File.chown(0, 0, path) if Process.uid.zero?",
+      "a stale user-owned plist must be healed to root ownership — File.write keeps an existing file's owner"
     refute_includes install, "chown_service_files",
       "chowning the plist to the invoking user makes launchd bootstrap fail with error 5"
     refute_includes install, "Ownership.",
@@ -188,6 +190,8 @@ end
 
     assert_includes install, "/etc/systemd/system/ask-local.service"
     assert_includes install, '"systemctl", "enable", "--now", "ask-local"'
+    assert_includes install, "File.chown(0, 0, unit_path) if Process.uid.zero?",
+      "a stale user-owned unit must be healed to root ownership"
   end
 
   def test_linux_uninstall_disables_and_removes_unit
@@ -251,6 +255,24 @@ class ElevatePromptSafetyTest < Minitest::Test
 
     ok = Ask::Local::CLI::SystemCommand.elevate(["env", "X=1", "cmd", "--internal"])
     assert ok, "interactive elevation with a password available must succeed"
+  end
+
+  def test_interactive_elevate_failure_says_rerun_not_sudoers
+    ENV.delete("CI")
+    $stdin.stubs(:tty?).returns(true)
+
+    Ask::Local::Command.expects(:run)
+      .with("sudo", "env", "X=1", "cmd", "--internal")
+      .returns(false)
+
+    ok = nil
+    code, _out, err = silently { ok = Ask::Local::CLI::SystemCommand.elevate(["env", "X=1", "cmd", "--internal"]) }
+
+    assert_equal 0, code
+    refute ok
+    assert_includes err, "re-run `ask-local setup`"
+    refute_includes err, "ask-local sudoers",
+      "the scoped-grant hint is for passwordless runs; an interactive failure is auth or the command's own error"
   end
 
   def test_service_install_elevates_through_command_not_bare_sudo
