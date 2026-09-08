@@ -88,6 +88,24 @@ class SetupCommandTest < Minitest::Test
     assert_equal 0, code
   end
 
+  def test_wait_for_ours_animates_while_proxy_starts
+    Ask::Local::ProxyControl.stubs(:ours?).returns(false).then.returns(true)
+
+    out = StringIO.new
+    orig = $stdout
+    $stdout = out
+    ok = begin
+      Ask::Local::CLI::SystemCommand.wait_for_ours(@ctx, 443, tls: true)
+    ensure
+      $stdout = orig
+    end
+
+    assert ok
+    assert_includes out.string, "starting the proxy on port 443"
+    assert_includes out.string, "."
+    assert out.string.end_with?(")\n"), "the progress line must close once the proxy answers"
+  end
+
   def test_no_service_flag_uses_sudo_daemon
     Ask::Local::Trust.stubs(:trust).returns({ trusted: true })
     Ask::Local::CLI::SystemCommand.stubs(:ensure_sudo_daemon).returns(true)

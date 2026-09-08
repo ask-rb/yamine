@@ -489,6 +489,8 @@ module Ask
             return
           end
 
+          puts "Note: setup takes a few seconds while the 443 service installs and starts."
+
           no_service = args.include?("--no-service")
           steps = no_service ? 4 : 3
 
@@ -598,14 +600,26 @@ module Ask
           false
         end
 
+        # Poll until our proxy answers. After bootstrap the launchd/
+        # systemd service takes a few seconds to boot, so show progress
+        # instead of a frozen prompt; silent when it is already up.
         def wait_for_ours(ctx, port, tls:, timeout: 20)
           deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
-          until ProxyControl.ours?(port, tls: tls)
+          waiting = false
+          loop do
+            return true if ProxyControl.ours?(port, tls: tls)
             return false if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
 
+            unless waiting
+              print "    (starting the proxy on port #{port}"
+              waiting = true
+            end
+            print "."
+            $stdout.flush
             sleep 0.5
           end
-          true
+        ensure
+          puts ")" if waiting
         end
 
         # ask-local start — one-setup-and-go: idempotent workstation setup
