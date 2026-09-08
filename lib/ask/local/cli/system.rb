@@ -41,6 +41,15 @@ module Ask
             hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
             if Hosts.sync(hostnames)
               puts "Synced #{hostnames.length} hostname(s) to /etc/hosts."
+            elsif !ProxyControl.root? && !hostnames.empty?
+              # /etc/hosts is root-owned; once the root service is
+              # installed the guidance is "run ask-local hosts sync" — so
+              # make that command work by re-running it elevated.
+              puts "Writing /etc/hosts needs root — re-running elevated..."
+              state = Certs.state_dir
+              cmd = ["env", "ASK_LOCAL_STATE_DIR=#{state}", RbConfig.ruby,
+                ProxyControl.bin_path, "hosts", "sync"]
+              exit(elevate(cmd) ? 0 : 1)
             else
               $stderr.puts "Could not write /etc/hosts (try sudo)."
               exit 1
@@ -136,8 +145,8 @@ module Ask
         def service(ctx, args)
           sub = args.first
           case sub
-          when "install" then service_install(ctx, args)
-          when "uninstall" then service_uninstall
+          when "install" then exit(service_install(ctx, args) ? 0 : 1)
+          when "uninstall" then exit(service_uninstall(ctx) ? 0 : 1)
           when "status" then service_status(ctx)
           else raise Error, "Usage: ask-local service [install|uninstall|status]"
           end
@@ -166,30 +175,53 @@ module Ask
         end
 
         # Root-owned LaunchDaemon binding 80/443 at boot (puma-dev model).
-        # Re-execs under sudo; the proxy runs with the invoking user's state
-        # dir so routes registered by unprivileged CLIs are shared
-        # (portless pattern). A root proxy can also write /etc/hosts.
+        # Non-root runs re-exec under sudo once (--internal marks the root
+        # half); the proxy runs with the invoking user's state dir so
+        # routes registered by unprivileged CLIs are shared. The root half
+        # can also write /etc/hosts.
         #
         # Non-interactive runs (agents, CI) use `sudo -n`: never prompts,
         # succeeds only when the scoped NOPASSWD grant from `ask-local
         # sudoers` is installed, and fails fast with guidance otherwise.
         # Interactive runs use plain sudo (one password, then the service
         # is installed for good).
+        #
+        # Returns true when the service is installed. No exit here: the
+        # bare `service install` CLI exits in `service`, while `setup`
+        # keeps going (hosts sync, doctor) after a successful install.
         def service_install(ctx, args)
-          if !ProxyControl.root? && !args.include?("--internal")
+          if ProxyControl.root?
+            install_service!(ctx)
+          elsif args.include?("--internal")
+            raise Error, "`service install --internal` is the root half of the sudo re-exec — run `ask-local service install`"
+          else
             puts "Installing system service (sudo required)..."
             state = Certs.state_dir
             cmd = ["env", "ASK_LOCAL_STATE_DIR=#{state}",
               RbConfig.ruby, ProxyControl.bin_path,
               "service", "install", "--internal"]
-            ok = elevate(cmd)
-            exit(ok ? 0 : 1)
+            elevate(cmd)
           end
+        end
+
+        def install_service!(ctx)
           case RUBY_PLATFORM
           when /darwin/ then install_launchd(ctx)
           when /linux/ then install_systemd
           else raise Error, "Service install not supported on #{RUBY_PLATFORM}"
           end
+          # Root can write /etc/hosts, so sync the routes registered so
+          # far while elevated — Safari works the moment setup finishes
+          # (Chrome resolves *.localhost natively).
+          sync_hosts_from_routes(ctx)
+          true
+        end
+
+        def sync_hosts_from_routes(ctx)
+          hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
+          return if hostnames.empty?
+
+          warn "    could not write /etc/hosts (run `sudo ask-local hosts sync` later)" unless Ask::Local::Hosts.sync(hostnames)
         end
 
         # Run a privileged command via sudo. Interactive: plain sudo (one
@@ -288,7 +320,11 @@ module Ask
         # bootstrap/bootout are the supported verbs (same as puma-dev and
         # portless); extracted so the command sequence is unit-testable.
         def launchctl_bootstrap(path)
-          Command.run("launchctl", "bootout", "system", path) # best-effort: not loaded yet is fine
+          # Best-effort: booting out a service that was never loaded prints
+          # "Boot-out failed: 5" — nothing to clear then, so keep it quiet.
+          # Any real leftover is removed silently; bootstrap errors below
+          # stay loud.
+          Command.run("launchctl", "bootout", "system", path, out: File::NULL, err: File::NULL)
           unless Command.run("launchctl", "bootstrap", "system", path)
             raise Error, "launchctl bootstrap failed — check the plist at #{path}"
           end
@@ -333,13 +369,13 @@ module Ask
           puts "Installed systemd service ask-local on port 443."
         end
 
-        def service_uninstall(_ctx)
+        def service_uninstall(ctx)
           if !ProxyControl.root?
+            puts "Removing system service (sudo required)..."
             state = Certs.state_dir
             cmd = ["env", "ASK_LOCAL_STATE_DIR=#{state}",
               RbConfig.ruby, ProxyControl.bin_path, "service", "uninstall", "--internal"]
-            ok = elevate(cmd)
-            exit(ok ? 0 : 1)
+            return elevate(cmd)
           end
           case RUBY_PLATFORM
           when /darwin/
@@ -355,6 +391,7 @@ module Ask
           else
             raise Error, "Service uninstall not supported on #{RUBY_PLATFORM}"
           end
+          true
         end
 
         def service_status(ctx)
@@ -485,7 +522,12 @@ module Ask
 
           step("#{no_service ? 3 : 2}/#{steps} Syncing /etc/hosts") do
             hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
-            unless Ask::Local::Hosts.sync(hostnames)
+            next if hostnames.empty?
+
+            # The root service install already synced under elevation; a
+            # plain re-run must not fail rewriting /etc/hosts unprivileged
+            # when the block is already in place.
+            unless Ask::Local::Hosts.synced?(hostnames) || Ask::Local::Hosts.sync(hostnames)
               abort_setup("Could not write /etc/hosts.",
                 "Run `sudo ask-local hosts sync`, then re-run `ask-local setup`.")
             end
@@ -532,7 +574,7 @@ module Ask
         # to a high port silently: a :port suffix in URLs would corrupt the
         # stable-URL promise, so failure here is a hard error with guidance.
         def ensure_root_service(ctx)
-          service_install(ctx, [])
+          return false unless service_install(ctx, [])
           wait_for_ours(ctx, 443, tls: true)
         rescue Error, SystemCallError => e
           warn "    service install failed: #{e.message}"

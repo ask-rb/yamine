@@ -38,18 +38,54 @@ class SetupCommandTest < Minitest::Test
     assert_includes out, "doctor"
   end
 
-  def test_full_run_with_stubbed_steps
-    Ask::Local::CLI::SystemCommand.stubs(:ensure_root_service).returns(true)
-    Ask::Local::Hosts.stubs(:sync).returns(true)
+  def stubbed_root_service_install
+    Ask::Local::ProxyControl.stubs(:root?).returns(false)
+    Ask::Local::Command.stubs(:run).returns(true)
+    Ask::Local::ProxyControl.stubs(:ours?).returns(true)
     Ask::Local::Doctor.stubs(:run).returns([])
     Ask::Local::Doctor.stubs(:print).returns(0)
+  end
+
+  def write_route(hostname)
+    FileUtils.mkdir_p(@dir)
+    File.write(File.join(@dir, "routes.json"),
+      JSON.generate([{ "hostname" => hostname, "kind" => "tcp", "target" => "127.0.0.1:3000", "pid" => 0 }]))
+  end
+
+  def test_default_run_continues_past_service_install_to_completion
+    # The real service_install path, not stubbed: a successful elevation
+    # must NOT exit mid-setup (it used to) — the flow has to reach hosts
+    # sync and doctor, and print Setup complete.
+    stubbed_root_service_install
 
     code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
     assert_equal 0, code
     assert_includes out, "1/3 Installing proxy service on port 443 (trusts CA)"
+    assert_includes out, "Installing system service (sudo required)"
     assert_includes out, "2/3 Syncing /etc/hosts"
     assert_includes out, "3/3 Verifying with doctor"
     assert_includes out, "Setup complete"
+  end
+
+  def test_hosts_step_writes_when_routes_exist_and_not_synced
+    write_route("myapp.localhost")
+    stubbed_root_service_install
+    Ask::Local::Hosts.stubs(:synced?).returns(false)
+    Ask::Local::Hosts.expects(:sync).with(["myapp.localhost"]).returns(true)
+
+    code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
+    assert_equal 0, code
+    assert_includes out, "Setup complete"
+  end
+
+  def test_hosts_step_skips_write_when_block_already_synced
+    write_route("myapp.localhost")
+    stubbed_root_service_install
+    Ask::Local::Hosts.stubs(:synced?).returns(true)
+    Ask::Local::Hosts.expects(:sync).never
+
+    code, _, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
+    assert_equal 0, code
   end
 
   def test_no_service_flag_uses_sudo_daemon
@@ -141,6 +177,10 @@ class EnsureProxyHardErrorTest < Minitest::Test
   def test_noninteractive_privileged_is_hard_error
     with_env("CI" => "1", "ASK_LOCAL_PORT" => nil) do
       $stdin.stubs(:tty?).returns(false)
+      # Deterministic regardless of the real machine: after a successful
+      # setup this box runs our own proxy on 443, which would otherwise
+      # short-circuit ensure_proxy! instead of hitting the hard error.
+      Ask::Local::ProxyControl.stubs(:listening?).returns(false)
       code, err = capture_err do
         Ask::Local::CLI::BootCommand.ensure_proxy!(@ctx)
       end

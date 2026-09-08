@@ -56,6 +56,14 @@ module Ask
         false
       end
 
+      # True when /etc/hosts already carries exactly the managed block for
+      # these hostnames. The root service install syncs under elevation;
+      # plain re-runs of setup must not fail trying to rewrite it
+      # unprivileged when nothing changed.
+      def synced?(hostnames, path = PATH)
+        read(path).include?(managed_block(hostnames))
+      end
+
       def clean(path = PATH)
         content = read(path)
         updated = content.sub(/#{Regexp.escape(BEGIN_MARKER)}.*?#{Regexp.escape(END_MARKER)}\n?/m, "")

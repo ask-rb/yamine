@@ -59,6 +59,10 @@ class SudoersTest < Minitest::Test
 
   def test_non_interactive_privileged_boot_points_at_sudoers
     write_local_yml(@dir)
+    # Deterministic regardless of the real machine: a dev box may already
+    # run our own proxy on 443 (installed via setup), which would make
+    # ensure_proxy! short-circuit instead of hitting the hard error.
+    Ask::Local::ProxyControl.stubs(:listening?).returns(false)
 
     code, _out, err = nil
     Dir.chdir(@dir) do
@@ -112,6 +116,8 @@ class LaunchctlVerbsTest < Minitest::Test
     assert_includes bootstrap, '"launchctl", "enable"'
     assert_includes bootstrap, '"launchctl", "kickstart"'
     assert_includes bootstrap, "launchctl bootstrap failed"
+    assert_includes bootstrap, "err: File::NULL",
+      "the best-effort pre-bootout must not print error-5 noise on a first install"
     refute_includes bootstrap, '"launchctl", "load"'
     refute_includes install, '"launchctl", "load"'
     refute_includes install, '"launchctl", "unload"'
@@ -287,7 +293,7 @@ class ElevatePromptSafetyTest < Minitest::Test
         "service", "install", "--internal")
       .returns(true)
 
-    code, out, = silently { Ask::Local::CLI::SystemCommand.service_install(Ask::Local::CLI::Context.new, []) }
+    code, out, = silently { Ask::Local::CLI.run(["service", "install"]) }
 
     assert_equal 0, code, "service install must exit 0 when the elevation succeeds"
     assert_includes out, "Installing system service"
