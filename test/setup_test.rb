@@ -106,6 +106,27 @@ class SetupCommandTest < Minitest::Test
     assert out.string.end_with?(")\n"), "the progress line must close once the proxy answers"
   end
 
+  def test_wait_for_ours_spins_on_a_terminal
+    Ask::Local::ProxyControl.stubs(:ours?).returns(false).then.returns(true)
+
+    out = StringIO.new
+    out.stubs(:tty?).returns(true)
+    orig = $stdout
+    $stdout = out
+    ok = begin
+      Ask::Local::CLI::SystemCommand.wait_for_ours(@ctx, 443, tls: true)
+    ensure
+      $stdout = orig
+    end
+
+    assert ok
+    assert_includes out.string, "starting the proxy on port 443 |",
+      "a terminal gets a rotating frame, not bare dots"
+    assert_includes out.string, "\b", "each frame rewinds so the spinner spins in place"
+    assert out.string.end_with?("proxy is up on port 443.\n"),
+      "the spinner line is replaced by a clean completion line"
+  end
+
   def test_no_service_flag_uses_sudo_daemon
     Ask::Local::Trust.stubs(:trust).returns({ trusted: true })
     Ask::Local::CLI::SystemCommand.stubs(:ensure_sudo_daemon).returns(true)

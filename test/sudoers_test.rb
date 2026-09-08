@@ -181,6 +181,16 @@ end
       "the elevated install must trust the CA system-wide before bootstrap"
   end
 
+  def test_install_reports_stage_progress
+    install = source[/def install_launchd(.*?)^        end/m, 1]
+    trust = source[/def ensure_system_ca_trust(.*?)^        end/m, 1]
+
+    assert_includes install, "Registering the launchd service on port 443",
+      "the root half must print stage lines so the terminal is never silent after the password"
+    assert_includes trust, "Trusting the CA into the System keychain...",
+      "the slow keychain step must announce itself before running"
+  end
+
   def test_system_ca_trust_uses_system_keychain
     trust_source = File.read(File.join(__dir__, "..", "lib", "ask", "local", "trust.rb"))
     macos = trust_source[/def trust_macos(.*?)^      end/m, 1]

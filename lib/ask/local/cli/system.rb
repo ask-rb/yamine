@@ -219,9 +219,13 @@ module Ask
 
         def sync_hosts_from_routes(ctx)
           hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
-          return if hostnames.empty?
-
-          warn "    could not write /etc/hosts (run `sudo ask-local hosts sync` later)" unless Ask::Local::Hosts.sync(hostnames)
+          if hostnames.empty?
+            puts "    No routes registered yet — hosts sync will happen on the next boot."
+          elsif Ask::Local::Hosts.sync(hostnames)
+            puts "    Synced #{hostnames.length} hostname(s) to /etc/hosts."
+          else
+            warn "    could not write /etc/hosts (run `sudo ask-local hosts sync` later)"
+          end
         end
 
         # Run a privileged command via sudo. Interactive: plain sudo (one
@@ -300,15 +304,20 @@ module Ask
           # (no GUI popup) and trusted for every user on the machine.
           File.chown(0, 0, path) if Process.uid.zero?
           ensure_system_ca_trust
+          puts "    Registering the launchd service on port 443..."
           launchctl_bootstrap(path)
           puts "Installed root LaunchDaemon on port 443 (state: #{state_dir})."
         end
 
         # Root-only CA trust: the System keychain (all users, no prompt).
         # Safe to call repeatedly — once the marker is set it is a no-op.
+        # Prints before doing work: the System keychain add can take a few
+        # seconds, and this runs in the root half of setup where silence
+        # reads as a hang.
         def ensure_system_ca_trust
           return if Certs.trusted?(Certs.state_dir)
 
+          puts "    Trusting the CA into the System keychain..."
           result = Trust.trust
           warn "    CA trust warning: #{result[:error]}" unless result[:trusted]
         end
@@ -364,6 +373,7 @@ module Ask
           File.write(unit_path, systemd_unit)
           File.chmod(0o644, unit_path)
           File.chown(0, 0, unit_path) if Process.uid.zero?
+          puts "    Registering the systemd service on port 443..."
           Command.run("systemctl", "daemon-reload") or raise Error, "systemctl daemon-reload failed"
           Command.run("systemctl", "enable", "--now", "ask-local") or raise Error, "systemctl enable failed"
           puts "Installed systemd service ask-local on port 443."
@@ -600,26 +610,44 @@ module Ask
           false
         end
 
-        # Poll until our proxy answers. After bootstrap the launchd/
-        # systemd service takes a few seconds to boot, so show progress
-        # instead of a frozen prompt; silent when it is already up.
+        # Poll until our proxy answers on the port. The freshly installed
+        # service takes a few seconds to boot, so show motion instead of a
+        # frozen prompt: a spinner on a terminal, dots elsewhere. Silent
+        # when the proxy is already up.
         def wait_for_ours(ctx, port, tls:, timeout: 20)
           deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+          terminal = $stdout.respond_to?(:tty?) && $stdout.tty?
           waiting = false
+          frame = 0
+          ok = false
           loop do
-            return true if ProxyControl.ours?(port, tls: tls)
-            return false if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+            if ProxyControl.ours?(port, tls: tls)
+              ok = true
+              break
+            end
+            break if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
 
             unless waiting
-              print "    (starting the proxy on port #{port}"
+              print terminal ? "    starting the proxy on port #{port} " : "    (starting the proxy on port #{port}"
               waiting = true
             end
-            print "."
+            if terminal
+              print %w[| / - \\][frame % 4], "\b"
+            else
+              print "."
+            end
             $stdout.flush
+            frame += 1
             sleep 0.5
           end
-        ensure
-          puts ")" if waiting
+          if waiting
+            if terminal
+              puts(ok ? "\r    proxy is up on port #{port}." : "\r    still not up on port #{port}.")
+            else
+              puts ")"
+            end
+          end
+          ok
         end
 
         # ask-local start — one-setup-and-go: idempotent workstation setup
