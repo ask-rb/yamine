@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    ask-local (0.2.0)
+    ask-local (0.2.1)
       base64 (~> 0.2)
 
 GEM
@@ -34,7 +34,7 @@ DEPENDENCIES
   simplecov (~> 0.22)
 
 CHECKSUMS
-  ask-local (0.2.0)
+  ask-local (0.2.1)
   base64 (0.3.0) sha256=27337aeabad6ffae05c265c450490628ef3ebd4b67be58257393227588f5a97b
   bundler (4.0.18) sha256=02d9a17429de1847b4e0c9f27a9ee4b20c0a74c0a641b4e77195d6019e3618ac
   docile (1.4.1) sha256=96159be799bfa73cdb721b840e9802126e4e03dfc26863db73647204c727f21e
