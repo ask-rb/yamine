@@ -16,11 +16,11 @@ module Yamine
     module_function
 
     # Path to the yamine executable relative to this file
-    # (lib/ask/local -> gem root/bin). Used for daemon spawn and
+    # (lib/yamine -> gem root/bin). Used for daemon spawn and
     # service install; both must resolve identically in dev checkouts
     # and installed gems.
     def bin_path
-      File.expand_path("../../../bin/yamine", __dir__)
+      File.expand_path("../../bin/yamine", __dir__)
     end
 
     def root?

@@ -90,15 +90,18 @@ module Yamine
     end
 
     # Run an arbitrary command with PORT + YAMINE_URL. Returns App.
+    # register: false spawns without a route (background processes).
     def boot_run(name:, hostname:, url:, dir:, command:, port: nil, force: false,
-      rails_dev_host: nil)
+      rails_dev_host: nil, register: true)
       port ||= Ports.find_free
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host)
       pid = with_clean_env { spawn(env, *command, chdir: dir) }
       Process.detach(pid)
       target = "127.0.0.1:#{port}"
-      @store.add_route(hostname, target, Process.pid, kind: "tcp", force: force)
-      write_backend_pid(hostname, pid)
+      if register
+        @store.add_route(hostname, target, Process.pid, kind: "tcp", force: force)
+        write_backend_pid(hostname, pid)
+      end
       App.new(name: name, hostname: hostname, url: url, pid: pid,
         target: target, kind: "tcp", command: command)
     end

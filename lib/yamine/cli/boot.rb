@@ -18,6 +18,9 @@ module Yamine
         variant = ENV["YAMINE_VARIANT"]
         opts = ctx.parse_flags(args, %i[variant tld force])
         resolved = resolve!(ctx, variant: opts[:variant] || variant, tld: opts[:tld])
+        # Ownership gate before any side effects: no proxy spawn, no
+        # port allocation when we'd refuse anyway.
+        check_worktree_ownership!(ctx, resolved, force: opts[:force])
         ensure_proxy!(ctx)
         boot_all(ctx, resolved, opts)
       end
@@ -60,9 +63,11 @@ module Yamine
         puts "--"
 
         processes.each do |proc_name, entry|
-          next if entry["proxy"] == false
-
           hostname = Resolver.hostname_for(resolved, proc_name)
+          if entry["proxy"] == false
+            boot_background(ctx, runner, resolved, proc_name, entry, opts, children)
+            next
+          end
           next unless hostname
 
           url = Hostname.url(hostname, port: ctx.proxy_port, tls: ctx.proxy_tls)
@@ -101,9 +106,49 @@ module Yamine
         ctx.report_unresolved(routes_registered.flat_map { |r| r[:hostnames] })
 
         # Supervisor: exit when ANY child dies (loud cleanup).
-        all_pids = routes_registered.map { |r| r[:app].pid }
-        trap_cleanup(ctx, routes_registered.flat_map { |r| r[:hostnames] }, all_pids)
-        supervise_tree(ctx, routes_registered.flat_map { |r| r[:hostnames] }, all_pids)
+        all_pids = routes_registered.map { |r| r[:app].pid } + children.map { |c| c[:pid] }
+        all_hostnames = routes_registered.flat_map { |r| r[:hostnames] }
+        trap_cleanup(ctx, all_hostnames, all_pids)
+        supervise_tree(ctx, all_hostnames, all_pids)
+      end
+
+      # A background process (proxy: false) is spawned, logged, and
+      # supervised exactly like an HTTP one — it just gets no route.
+      def boot_background(ctx, runner, resolved, proc_name, entry, opts, children)
+        cmd = entry["cmd"].to_s
+        if cmd.match?(Yamine::Procfile::COMPOUND)
+          $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — run explicitly: yamine run -- #{cmd}"
+          return
+        end
+        port = opts[:app_port] || Ports.find_free
+        url = "background://#{resolved.app}/#{proc_name}"
+        app = runner.boot_run(name: proc_name, hostname: "#{resolved.app}.#{proc_name}.internal",
+          url: url, dir: Dir.pwd, command: ["sh", "-c", cmd], port: port,
+          force: opts[:force], rails_dev_host: nil, register: false)
+        children << { name: proc_name, pid: app.pid }
+        puts "  [#{proc_name}] background (pid #{app.pid})"
+      end
+
+      # Refuse to boot over another agent's live routes unless forced.
+      # Compares our worktree dir (spec.dir) against the owner's: same
+      # dir + same agent is a restart, anything else names the owner.
+      def check_worktree_ownership!(ctx, resolved, force:)
+        mine = Agent.name
+        here = File.expand_path(Dir.pwd)
+        Resolver.hostnames(resolved).each do |hostname|
+          entry = ctx.store.find(hostname)
+          next unless entry
+          next unless entry["pid"] != 0 && ProxyControl.pid_alive?(entry["pid"])
+          next if entry["agent"] == mine && entry.dig("spec", "dir") == here
+          next if force
+
+          owner = entry["agent"] && !entry["agent"].empty? ? "agent #{entry["agent"].inspect}" : "PID #{entry["pid"]}"
+          dir = entry.dig("spec", "dir")
+          $stderr.puts "Error: #{hostname} is live and owned by #{owner}#{dir ? " (#{dir})" : ""}."
+          $stderr.puts "  Work in your own worktree (each branch gets its own URL), or take over explicitly:"
+          $stderr.puts "    yamine start --force"
+          exit 1
+        end
       end
 
       def build_env(ctx, resolved, entry)

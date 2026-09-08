@@ -8,12 +8,16 @@ module Yamine
       module_function
 
       # yamine get <name> [--service x] [--variant y] [--tld z]
+      # yamine get --all [--json]
       #
       # Variant and TLDs are inherited from the CURRENT directory's
       # context (worktree branch, YAMINE_* env, config) so cross-service
       # wiring works inside a variant: from a fix-ui worktree,
       # `get backend` -> https://fix-ui.backend.localhost.
       def get(ctx, args)
+        if args.delete("--all")
+          return registry(ctx, args)
+        end
         name = args.first
         raise Error, "Usage: yamine get <name> [--service s] [--variant v] [--tld t]" unless name
 
@@ -36,7 +40,8 @@ module Yamine
           { hostname: r["hostname"],
             url: Hostname.url(r["hostname"], port: port, tls: tls),
             target: r["target"], kind: r["kind"],
-            pid: r["pid"], supervised: !r["spec"].nil?,
+            pid: r["pid"], agent: r["agent"],
+            supervised: !r["spec"].nil?,
             alive: alive_state(ctx, r) }
         end
         if json
@@ -56,6 +61,34 @@ module Yamine
         puts
       end
 
+      # Shared discovery: `get --all` lists every live route (any owner)
+      # with its URL and agent, so one agent can find another's services
+      # without coupling. `--json` emits the same stable keys as list.
+      def registry(ctx, args)
+        json = args.delete("--json")
+        routes = ctx.store.load_routes
+        port = ctx.proxy_port
+        tls = ctx.proxy_tls
+        entries = routes.map do |r|
+          { hostname: r["hostname"],
+            url: Hostname.url(r["hostname"], port: port, tls: tls),
+            agent: r["agent"], alive: alive_state(ctx, r) }
+        end
+        if json
+          require "json"
+          puts JSON.generate({ routes: entries })
+          return
+        end
+        if entries.empty?
+          puts "No active routes."
+          return
+        end
+        entries.each do |e|
+          owner = e[:agent] ? " (#{e[:agent]})" : ""
+          puts "  #{e[:url]}#{owner}"
+        end
+      end
+
       def alive_state(ctx, route)
         if route["pid"] == 0
           ctx.backend_alive?(route) ? "reachable" : "unreachable"
@@ -69,10 +102,11 @@ module Yamine
       end
 
       def label_for(entry)
+        owner = entry[:agent] ? " #{entry[:agent]}" : ""
         if entry[:pid] == 0
-          "(alias, #{entry[:alive]})"
+          "(alias, #{entry[:alive]}#{owner})"
         else
-          "(pid #{entry[:pid]}, #{entry[:alive]})"
+          "(pid #{entry[:pid]}, #{entry[:alive]}#{owner})"
         end
       end
 
@@ -84,7 +118,19 @@ module Yamine
         label_for(entry)
       end
 
-      def prune(ctx, _args)
+      def prune(ctx, args)
+        if (i = args.index("--agent"))
+          agent = args.fetch(i + 1, nil)
+          raise Error, "Usage: yamine prune --agent NAME" if agent.nil? || agent.empty?
+
+          stale = ctx.store.prune_stale(agent: agent)
+          if stale.empty?
+            puts "No stale routes for agent #{agent.inspect}."
+          else
+            stale.each { |r| puts "Removed stale route #{r["hostname"]}." }
+          end
+          return
+        end
         stale = ctx.store.prune_stale
         if stale.empty?
           puts "No stale routes."
@@ -124,14 +170,30 @@ module Yamine
       # Stop the app in the current directory (route + backend).
       # Exit codes are machine-readable for agents: 0 stopped something,
       # 2 no route here, 3 route existed but the backend was already gone.
-      def stop(ctx, _args, out: $stdout)
+      # Only our own agent's routes are touched: a foreign-owned live
+      # route is reported, never killed (shared backends survive one
+      # agent's cleanup). --force overrides and names the previous owner.
+      def stop(ctx, args, out: $stdout)
+        force = args.delete("--force")
         resolved = Resolver.resolve(Dir.pwd)
         hostnames = Resolver.hostnames(resolved)
+        mine = Agent.name
         stopped = []
         gone = []
+        foreign = []
         hostnames.each do |hostname|
           entry = ctx.store.find(hostname)
           next unless entry
+
+          if entry["pid"] != 0 && entry["agent"] && entry["agent"] != mine &&
+              ProxyControl.pid_alive?(entry["pid"])
+            unless force
+              owner = entry["agent"].empty? ? "PID #{entry["pid"]}" : "agent #{entry["agent"].inspect}"
+              foreign << "#{hostname} (owned by #{owner})"
+              next
+            end
+            out.puts "Taking over #{hostname} from #{entry["agent"].inspect} (--force)."
+          end
 
           backend_pid = ctx.backend_pid_for(entry)
           if backend_pid && ProxyControl.pid_alive?(backend_pid)
@@ -154,6 +216,11 @@ module Yamine
         if stopped.any?
           stopped.each { |s| out.puts "Stopped #{s}." }
           return 0
+        end
+        if foreign.any?
+          out.puts "Skipped live routes owned by other agents: #{foreign.join(", ")}."
+          out.puts "Take over explicitly with `yamine stop --force`."
+          return 4
         end
         if gone.any?
           out.puts "Route existed but the backend was already gone: #{gone.join(", ")}."

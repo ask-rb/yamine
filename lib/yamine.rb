@@ -2,6 +2,7 @@
 
 require_relative "yamine/version"
 require_relative "yamine/errors"
+require_relative "yamine/agent"
 require_relative "yamine/sanitize"
 require_relative "yamine/hostname"
 require_relative "yamine/inference"
