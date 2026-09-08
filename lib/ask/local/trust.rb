@@ -91,7 +91,7 @@ module Ask
           # to clear duplicate CN entries from each keychain.
           [login_keychain, "/Library/Keychains/System.keychain"].each do |kc|
             5.times do
-              Open3.capture2("security", "delete-certificate", "-c", CA_COMMON_NAME, kc)
+              Open3.capture2("security", "delete-certificate", "-c", Certs::CA_COMMON_NAME, kc)
             end
           rescue SystemCallError
             nil
@@ -102,7 +102,7 @@ module Ask
           FileUtils.rm_f(dest) if File.file?(dest)
           Open3.capture2(update_cmd)
         when :windows
-          Open3.capture2("certutil", "-delstore", "-user", "Root", CA_COMMON_NAME)
+          Open3.capture2("certutil", "-delstore", "-user", "Root", Certs::CA_COMMON_NAME)
         end
         trusted_after = begin
           Certs.trusted?(dir)
