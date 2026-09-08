@@ -8,8 +8,8 @@ require_relative "../test_helper"
 class BackendSidecarTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
-    @store = Ask::Local::RouteStore.new(@dir)
-    @runner = Ask::Local::Runner.new(store: @store, on_log: ->(m) {})
+    @store = Yamine::RouteStore.new(@dir)
+    @runner = Yamine::Runner.new(store: @store, on_log: ->(m) {})
   end
 
   def teardown
@@ -35,20 +35,20 @@ class SupervisorBootOnRequestIntegrationTest < Minitest::Test
   # The full puma-dev cycle: request -> 200; backend killed; supervisor
   # marks dead; next request transparently boots a new backend -> 200.
   def test_boot_on_request_after_crash
-    app_dir = "/Users/kaka/Code/ask-rb/ask-local-apps/bare-rack"
+    app_dir = "/Users/kaka/Code/ask-rb/yamine-apps/bare-rack"
     skip "fixture fleet not present" unless File.file?(File.join(app_dir, "config.ru"))
 
     state = Dir.mktmpdir
     new_pid = nil
-    store = Ask::Local::RouteStore.new(state)
-    runner = Ask::Local::Runner.new(store: store, on_log: ->(m) {})
+    store = Yamine::RouteStore.new(state)
+    runner = Yamine::Runner.new(store: store, on_log: ->(m) {})
     app = runner.boot_managed(name: "bare-rack", hostname: "crash-test.localhost",
       url: "https://crash-test.localhost", dir: app_dir)
     first_pid = app.pid
 
-    sup = Ask::Local::Supervisor.new(store: store, runner: runner,
+    sup = Yamine::Supervisor.new(store: store, runner: runner,
       interval: 0.2, idle_timeout: 900, on_event: ->(m) { })
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false, supervisor: sup)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false, supervisor: sup)
     server = TCPServer.new("127.0.0.1", 0)
     port = server.addr[1]
     accept = Thread.new do
@@ -79,7 +79,7 @@ class SupervisorBootOnRequestIntegrationTest < Minitest::Test
     if new_pid
       Process.kill("TERM", new_pid) rescue nil
     else
-      FileUtils.rm_f(File.join(app_dir, "tmp", "sockets", "ask-local.sock"))
+      FileUtils.rm_f(File.join(app_dir, "tmp", "sockets", "yamine.sock"))
     end
     FileUtils.remove_entry(state) if state
   end

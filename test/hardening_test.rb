@@ -4,12 +4,12 @@ require_relative "test_helper"
 
 class CommandSplitTest < Minitest::Test
   def test_dispatcher_routes_new_commands
-    assert_includes Ask::Local::CLI::SUBCOMMANDS, "status"
-    assert_includes Ask::Local::CLI::SUBCOMMANDS, "open"
+    assert_includes Yamine::CLI::SUBCOMMANDS, "status"
+    assert_includes Yamine::CLI::SUBCOMMANDS, "open"
   end
 
   def test_old_helpers_still_work_via_cli
-    cli = Ask::Local::CLI.new
+    cli = Yamine::CLI.new
     cmd = ["bundle", "exec", "jekyll", "serve"]
     assert_equal cmd + ["--port", "4123", "--host", "127.0.0.1"],
       cli.send(:inject_port_flags, cmd, 4123)
@@ -20,7 +20,7 @@ class CommandSplitTest < Minitest::Test
     FileUtils.mkdir_p(File.join(dir, "config")); File.write(File.join(dir, "config", "local.yml"), "service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  api:\n    cmd: s\n    proxy: true")
     code, out = nil, nil
     Dir.chdir(dir) do
-      code, out = capture { Ask::Local::CLI.run(["status"]) }
+      code, out = capture { Yamine::CLI.run(["status"]) }
     end
     assert_equal 0, code
     assert_includes out, "app:"
@@ -36,30 +36,30 @@ class CommandSplitTest < Minitest::Test
     File.write(File.join(dir, "config", "local.yml"),
       "service: myapp\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
     state = Dir.mktmpdir
-    orig = ENV["ASK_LOCAL_STATE_DIR"]
-    ENV["ASK_LOCAL_STATE_DIR"] = state
+    orig = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = state
     Dir.chdir(dir) do
       # No route here -> exit 2.
-      code, out = capture { Ask::Local::CLI.run(["stop"]) }
+      code, out = capture { Yamine::CLI.run(["stop"]) }
       assert_equal 2, code
-      assert_includes out, "No ask-local app running here"
+      assert_includes out, "No yamine app running here"
     end
   ensure
-    ENV["ASK_LOCAL_STATE_DIR"] = orig
+    ENV["YAMINE_STATE_DIR"] = orig
     FileUtils.remove_entry(dir) if dir
     FileUtils.remove_entry(state) if state
   end
 
   def test_list_shows_liveness_labels
     dir = Dir.mktmpdir
-    orig = ENV["ASK_LOCAL_STATE_DIR"]
-    ENV["ASK_LOCAL_STATE_DIR"] = dir
-    store = Ask::Local::RouteStore.new(dir)
+    orig = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = dir
+    store = Yamine::RouteStore.new(dir)
     store.add_route("up.localhost", "127.0.0.1:4001", Process.pid, kind: "tcp")
-    _code, out = capture { Ask::Local::CLI.run(["list"]) }
+    _code, out = capture { Yamine::CLI.run(["list"]) }
     assert_includes out, "running"
   ensure
-    ENV["ASK_LOCAL_STATE_DIR"] = orig
+    ENV["YAMINE_STATE_DIR"] = orig
     FileUtils.remove_entry(dir) if dir
   end
 
@@ -84,7 +84,7 @@ class OwnershipTest < Minitest::Test
     dir = Dir.mktmpdir
     file = File.join(dir, "x")
     File.write(file, "1")
-    Ask::Local::Ownership.fix(file)
+    Yamine::Ownership.fix(file)
     assert File.file?(file)
   ensure
     FileUtils.remove_entry(dir) if dir
@@ -92,15 +92,15 @@ class OwnershipTest < Minitest::Test
 
   def test_invoking_user_nil_without_sudo
     orig = ENV.delete("SUDO_USER")
-    assert_nil Ask::Local::Ownership.invoking_user
+    assert_nil Yamine::Ownership.invoking_user
   ensure
     ENV["SUDO_USER"] = orig if orig
   end
 
   def test_doctor_state_check_passes_on_writable_dir
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
-    check = Ask::Local::Doctor.check_state_dir(store)
+    store = Yamine::RouteStore.new(dir)
+    check = Yamine::Doctor.check_state_dir(store)
     assert check.ok
     assert_includes check.message, "writable"
   ensure
@@ -111,8 +111,8 @@ end
 class ProxyHardeningTest < Minitest::Test
   def test_connection_cap_rejects_with_503
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false, max_connections: 0)
+    store = Yamine::RouteStore.new(dir)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false, max_connections: 0)
     server = TCPServer.new("127.0.0.1", 0)
     port = server.addr[1]
     accept = Thread.new do
@@ -132,9 +132,9 @@ class ProxyHardeningTest < Minitest::Test
 
   def test_route_cache_reflects_mtime_changes
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("a.localhost", "127.0.0.1:4001", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     first = proxy.send(:cached_routes)
     assert_equal ["a.localhost"], first.map { |r| r["hostname"] }
     # Mutating the file bumps mtime: the next read sees it immediately
@@ -148,7 +148,7 @@ class ProxyHardeningTest < Minitest::Test
   end
 
   def test_oversize_hostname_not_routed
-    proxy = Ask::Local::Proxy.new(store: nil)
+    proxy = Yamine::Proxy.new(store: nil)
     routes = [{ "hostname" => "myapp.localhost" }]
     assert_nil proxy.route("#{"a" * 300}.localhost", routes)
   end
@@ -165,13 +165,13 @@ class ProxyHardeningTest < Minitest::Test
           head << l
           break if head =~ /\r\n\r\n\z/
         end
-        s.write("HTTP/1.1 404 Not Found\r\nX-Ask-Local: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        s.write("HTTP/1.1 404 Not Found\r\nX-Yamine: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         s.close
       rescue StandardError
         break
       end
     end
-    assert Ask::Local::ProxyControl.ours?(port, tls: false),
+    assert Yamine::ProxyControl.ours?(port, tls: false),
       "health check must succeed against an IPv6 loopback listener"
   ensure
     server&.close
@@ -181,12 +181,12 @@ end
 class RailsDevHostTest < Minitest::Test
   def test_child_env_sets_rails_development_hosts
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
-    runner = Ask::Local::Runner.new(store: store, on_log: ->(_m) {})
+    store = Yamine::RouteStore.new(dir)
+    runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
     env = runner.send(:child_env, dir, url: "https://myapp.localhost",
       port: 4001, rails_dev_host: "myapp.localhost")
     assert_equal "myapp.localhost", env["RAILS_DEVELOPMENT_HOSTS"]
-    assert_equal "https://myapp.localhost", env["ASK_LOCAL_URL"]
+    assert_equal "https://myapp.localhost", env["YAMINE_URL"]
     assert_equal "4001", env["PORT"]
   ensure
     FileUtils.remove_entry(dir) if dir
@@ -194,8 +194,8 @@ class RailsDevHostTest < Minitest::Test
 
   def test_child_env_without_rails_dev_host_sets_nothing
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
-    runner = Ask::Local::Runner.new(store: store, on_log: ->(_m) {})
+    store = Yamine::RouteStore.new(dir)
+    runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
     env = runner.send(:child_env, dir, url: "http://x.localhost", port: 4001)
     refute env.key?("RAILS_DEVELOPMENT_HOSTS")
   ensure
@@ -204,8 +204,8 @@ class RailsDevHostTest < Minitest::Test
 
   def test_boot_run_forwards_rails_dev_host
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
-    runner = Ask::Local::Runner.new(store: store, on_log: ->(_m) {})
+    store = Yamine::RouteStore.new(dir)
+    runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
     app = runner.boot_run(name: "web", hostname: "myapp.localhost",
       url: "http://myapp.localhost:4001", dir: dir,
       command: ["sh", "-c", "exit 0"], port: 4001,

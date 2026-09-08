@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    ask-local (0.2.1)
+    yamine (0.3.0)
       base64 (~> 0.2)
 
 GEM
@@ -26,15 +26,14 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
-  ask-local!
   base64
   minitest (~> 5.25)
   mocha (~> 3.1)
   rake (~> 13.0)
   simplecov (~> 0.22)
+  yamine!
 
 CHECKSUMS
-  ask-local (0.2.1)
   base64 (0.3.0) sha256=27337aeabad6ffae05c265c450490628ef3ebd4b67be58257393227588f5a97b
   bundler (4.0.18) sha256=02d9a17429de1847b4e0c9f27a9ee4b20c0a74c0a641b4e77195d6019e3618ac
   docile (1.4.1) sha256=96159be799bfa73cdb721b840e9802126e4e03dfc26863db73647204c727f21e
@@ -45,6 +44,7 @@ CHECKSUMS
   simplecov (0.22.0) sha256=fe2622c7834ff23b98066bb0a854284b2729a569ac659f82621fc22ef36213a5
   simplecov-html (0.13.2) sha256=bd0b8e54e7c2d7685927e8d6286466359b6f16b18cb0df47b508e8d73c777246
   simplecov_json_formatter (0.1.4) sha256=529418fbe8de1713ac2b2d612aa3daa56d316975d307244399fa4838c601b428
+  yamine (0.3.0)
 
 BUNDLED WITH
   4.0.18

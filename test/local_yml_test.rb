@@ -5,14 +5,14 @@ require_relative "test_helper"
 class LocalYmlConfigTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
-    @orig = ENV["ASK_LOCAL_STATE_DIR"]
-    ENV["ASK_LOCAL_STATE_DIR"] = Dir.mktmpdir
+    @orig = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = Dir.mktmpdir
   end
 
   def teardown
     FileUtils.remove_entry(@dir) rescue nil
-    FileUtils.remove_entry(ENV["ASK_LOCAL_STATE_DIR"]) rescue nil
-    ENV["ASK_LOCAL_STATE_DIR"] = @orig
+    FileUtils.remove_entry(ENV["YAMINE_STATE_DIR"]) rescue nil
+    ENV["YAMINE_STATE_DIR"] = @orig
   end
 
   def write_config(content)
@@ -33,7 +33,7 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: bin/jobs
           proxy: false
     YAML
-    config = Ask::Local::Config.load(@dir)
+    config = Yamine::Config.load(@dir)
     assert_equal "myapp", config.service
     assert_equal "localhost", config.proxy_config["tld"]
     assert config.processes.key?("web")
@@ -50,7 +50,7 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: bin/rails s
           proxy: true
     YAML
-    config = Ask::Local::Config.load(@dir)
+    config = Yamine::Config.load(@dir)
     assert_equal "local.example.com", config.proxy_config["tld"]
   end
 
@@ -64,12 +64,12 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: bin/rails s
           proxy: true
     YAML
-    config = Ask::Local::Config.load(@dir)
+    config = Yamine::Config.load(@dir)
     assert_equal "myapp.local.example.com", config.proxy_config["host"]
   end
 
   def test_missing_config_returns_nil
-    assert_nil Ask::Local::Config.load(@dir)
+    assert_nil Yamine::Config.load(@dir)
   end
 
   def test_missing_service_raises
@@ -80,8 +80,8 @@ class LocalYmlConfigTest < Minitest::Test
         web:
           cmd: bin/rails s
     YAML
-    err = assert_raises(Ask::Local::ConfigError) do
-      Ask::Local::Config.load(@dir)
+    err = assert_raises(Yamine::ConfigError) do
+      Yamine::Config.load(@dir)
     end
     assert_match(/service.*required/, err.message)
   end
@@ -91,8 +91,8 @@ class LocalYmlConfigTest < Minitest::Test
       service: myapp
       processes: {}
     YAML
-    err = assert_raises(Ask::Local::ConfigError) do
-      Ask::Local::Config.load(@dir)
+    err = assert_raises(Yamine::ConfigError) do
+      Yamine::Config.load(@dir)
     end
     assert_match(/at least one process/, err.message)
   end
@@ -100,8 +100,8 @@ class LocalYmlConfigTest < Minitest::Test
   def test_invalid_yml_raises
     FileUtils.mkdir_p(File.join(@dir, "config"))
     File.write(File.join(@dir, "config", "local.yml"), ":\n  bad: [yaml")
-    err = assert_raises(Ask::Local::ConfigError) do
-      Ask::Local::Config.load(@dir)
+    err = assert_raises(Yamine::ConfigError) do
+      Yamine::Config.load(@dir)
     end
     assert_match(/Invalid YAML/, err.message)
   end
@@ -116,7 +116,7 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: "bin/rails s -e <%= ENV.fetch('RAILS_ENV', 'development') %>"
           proxy: true
     YAML
-    config = Ask::Local::Config.load(@dir)
+    config = Yamine::Config.load(@dir)
     assert_includes config.processes["web"]["cmd"], "development"
   end
 
@@ -129,7 +129,7 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: bin/rails s
           proxy: true
     YAML
-    config = Ask::Local::Config.load(@dir)
+    config = Yamine::Config.load(@dir)
     assert_equal "myapp", config.service
   end
 
@@ -142,8 +142,8 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: bin/rails s
           proxy: true
     YAML
-    err = assert_raises(Ask::Local::ConfigError) do
-      Ask::Local::Config.load(@dir)
+    err = assert_raises(Yamine::ConfigError) do
+      Yamine::Config.load(@dir)
     end
     assert_match(/Unknown key/, err.message)
   end
@@ -164,7 +164,7 @@ class LocalYmlConfigTest < Minitest::Test
       proxy:
         tld: local.staging.example.com
     YAML
-    config = Ask::Local::Config.load(@dir, variant: "staging")
+    config = Yamine::Config.load(@dir, variant: "staging")
     assert_equal "local.staging.example.com", config.proxy_config["tld"]
     assert_equal "myapp", config.service
   end
@@ -180,8 +180,8 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: bin/rails s
           proxy: true
     YAML
-    err = assert_raises(Ask::Local::ConfigError) do
-      Ask::Local::Config.load(@dir)
+    err = assert_raises(Yamine::ConfigError) do
+      Yamine::Config.load(@dir)
     end
     assert_match(/one of host or tld/, err.message)
   end
@@ -199,12 +199,12 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: bin/jobs
           proxy: false
     YAML
-    config = Ask::Local::Config.load(@dir)
-    resolved = Ask::Local::Resolver.resolve(@dir)
+    config = Yamine::Config.load(@dir)
+    resolved = Yamine::Resolver.resolve(@dir)
     assert_equal "myapp", resolved.app
     assert_equal "localhost", resolved.tld
-    assert_equal "myapp.localhost", Ask::Local::Resolver.hostname_for(resolved, "web")
-    assert_nil Ask::Local::Resolver.hostname_for(resolved, "worker")
+    assert_equal "myapp.localhost", Yamine::Resolver.hostname_for(resolved, "web")
+    assert_nil Yamine::Resolver.hostname_for(resolved, "worker")
   end
 
   def test_init_creates_config_from_procfile
@@ -214,7 +214,7 @@ class LocalYmlConfigTest < Minitest::Test
       worker: bin/jobs
     PROCFILE
     Dir.chdir(@dir) do
-      Ask::Local::CLI::SystemCommand.init(Ask::Local::CLI::Context.new, [])
+      Yamine::CLI::SystemCommand.init(Yamine::CLI::Context.new, [])
     end
     config_path = File.join(@dir, "config", "local.yml")
     assert File.file?(config_path)
@@ -242,8 +242,8 @@ class LocalYmlConfigTest < Minitest::Test
           cmd: bin/jobs
           proxy: false
     YAML
-    resolved = Ask::Local::Resolver.resolve(@dir)
-    hostnames = Ask::Local::Resolver.hostnames(resolved)
+    resolved = Yamine::Resolver.resolve(@dir)
+    hostnames = Yamine::Resolver.hostnames(resolved)
     assert_includes hostnames, "myapp.localhost"
     assert_includes hostnames, "api.myapp.localhost"
     refute_includes hostnames, "worker.myapp.localhost"

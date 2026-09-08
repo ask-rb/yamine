@@ -7,9 +7,9 @@ class RebindingTest < Minitest::Test
   # our own TLDs get the helpful route list.
   def proxy_with(routes, tlds: ["localhost"])
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     routes.each { |h| store.add_route(h, "127.0.0.1:4001", 0, kind: "tcp") }
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false, tlds: tlds)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false, tlds: tlds)
     [proxy, dir]
   end
 
@@ -82,8 +82,8 @@ class MtimeCacheTest < Minitest::Test
   # mtime-keyed cache has no TTL race for boot-then-curl agents.
   def test_fresh_route_visible_immediately
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    store = Yamine::RouteStore.new(dir)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     backend = TCPServer.new("127.0.0.1", 0)
     bport = backend.addr[1]
     serve_backend = Thread.new do

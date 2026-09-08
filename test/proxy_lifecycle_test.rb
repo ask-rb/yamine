@@ -5,7 +5,7 @@ require_relative "test_helper"
 class ProxyControlTest < Minitest::Test
   def setup
     @state = Dir.mktmpdir
-    @store = Ask::Local::RouteStore.new(@state)
+    @store = Yamine::RouteStore.new(@state)
   end
 
   def teardown
@@ -13,9 +13,9 @@ class ProxyControlTest < Minitest::Test
   end
 
   def test_bin_path_resolves_to_real_binary
-    path = Ask::Local::ProxyControl.bin_path
+    path = Yamine::ProxyControl.bin_path
     assert File.file?(path), "bin_path should point at the real executable: #{path}"
-    assert_match(%r{/bin/ask-local\z}, path)
+    assert_match(%r{/bin/yamine\z}, path)
     refute_match(%r{/lib/}, path)
   end
 
@@ -31,14 +31,14 @@ class ProxyControlTest < Minitest::Test
         break
       end
     end
-    refute Ask::Local::ProxyControl.ours?(port, tls: false)
+    refute Yamine::ProxyControl.ours?(port, tls: false)
   ensure
     server&.close
   end
 
-  def test_ours_true_for_ask_local_proxy
+  def test_ours_true_for_yamine_proxy
     store = @store
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     port = server.addr[1]
     Thread.new do
@@ -52,35 +52,35 @@ class ProxyControlTest < Minitest::Test
       end
     end
     sleep 0.2
-    assert Ask::Local::ProxyControl.ours?(port, tls: false)
+    assert Yamine::ProxyControl.ours?(port, tls: false)
   ensure
     server&.close
   end
 
   def test_spawn_daemon_and_stop_end_to_end
-    skip "requires spawnable ask-local binary (dev checkout)" unless File.file?(Ask::Local::ProxyControl.bin_path)
+    skip "requires spawnable yamine binary (dev checkout)" unless File.file?(Yamine::ProxyControl.bin_path)
 
-    port = Ask::Local::Ports.find_free
-    pid = Ask::Local::ProxyControl.spawn_daemon(store: @store, port: port, tls: false)
-    assert Ask::Local::ProxyControl.ours?(port, tls: false)
-    assert_equal port, Ask::Local::ProxyControl.proxy_port(@store)
-    assert_equal pid, Ask::Local::ProxyControl.read_pid(@store)
+    port = Yamine::Ports.find_free
+    pid = Yamine::ProxyControl.spawn_daemon(store: @store, port: port, tls: false)
+    assert Yamine::ProxyControl.ours?(port, tls: false)
+    assert_equal port, Yamine::ProxyControl.proxy_port(@store)
+    assert_equal pid, Yamine::ProxyControl.read_pid(@store)
 
-    result = Ask::Local::ProxyControl.stop(@store)
+    result = Yamine::ProxyControl.stop(@store)
     assert_equal :stopped, result
-    assert_nil Ask::Local::ProxyControl.proxy_port(@store)
+    assert_nil Yamine::ProxyControl.proxy_port(@store)
   ensure
-    Process.kill("TERM", pid) if pid && Ask::Local::ProxyControl.pid_alive?(pid)
+    Process.kill("TERM", pid) if pid && Yamine::ProxyControl.pid_alive?(pid)
   end
 
   def test_spawn_daemon_failure_includes_log_tail
-    skip "requires spawnable ask-local binary (dev checkout)" unless File.file?(Ask::Local::ProxyControl.bin_path)
+    skip "requires spawnable yamine binary (dev checkout)" unless File.file?(Yamine::ProxyControl.bin_path)
 
     # Occupy the port so the daemon's bind fails.
     squatter = TCPServer.new("127.0.0.1", 0)
     port = squatter.addr[1]
-    error = assert_raises(Ask::Local::ProxyNotRunningError) do
-      Ask::Local::ProxyControl.spawn_daemon(store: @store, port: port, tls: false)
+    error = assert_raises(Yamine::ProxyNotRunningError) do
+      Yamine::ProxyControl.spawn_daemon(store: @store, port: port, tls: false)
     end
     assert_includes error.message, "proxy.log"
     assert_match(/Address already in use|EADDRINUSE/i, error.message)
@@ -95,15 +95,15 @@ class ProxyControlTest < Minitest::Test
   # succeeded, so spawn_daemon raised ProxyNotRunningError. A plaintext
   # connection must be one dropped connection, not a fatal crash.
   def test_tls_daemon_survives_plaintext_probe
-    skip "requires spawnable ask-local binary (dev checkout)" unless File.file?(Ask::Local::ProxyControl.bin_path)
+    skip "requires spawnable yamine binary (dev checkout)" unless File.file?(Yamine::ProxyControl.bin_path)
 
-    port = Ask::Local::Ports.find_free
-    pid = Ask::Local::ProxyControl.spawn_daemon(store: @store, port: port, tls: true)
-    assert Ask::Local::ProxyControl.ours?(port, tls: true),
+    port = Yamine::Ports.find_free
+    pid = Yamine::ProxyControl.spawn_daemon(store: @store, port: port, tls: true)
+    assert Yamine::ProxyControl.ours?(port, tls: true),
       "spawn_daemon's own plaintext-first readiness probe must not kill the TLS daemon"
-    assert_equal pid, Ask::Local::ProxyControl.read_pid(@store)
+    assert_equal pid, Yamine::ProxyControl.read_pid(@store)
   ensure
-    Process.kill("TERM", pid) if pid && Ask::Local::ProxyControl.pid_alive?(pid)
+    Process.kill("TERM", pid) if pid && Yamine::ProxyControl.pid_alive?(pid)
   end
 end
 
@@ -132,9 +132,9 @@ class ProxyKeepAliveTest < Minitest::Test
     end
 
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("myapp.localhost", "127.0.0.1:#{bport}", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     pport = server.addr[1]
     accept = Thread.new do
@@ -177,9 +177,9 @@ class ProxyKeepAliveTest < Minitest::Test
     end
 
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("myapp.localhost", "127.0.0.1:#{bport}", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     pport = server.addr[1]
     accept = Thread.new do
@@ -230,9 +230,9 @@ class ProxyKeepAliveTest < Minitest::Test
     end
 
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("ws.localhost", "127.0.0.1:#{bport}", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     pport = server.addr[1]
     accept = Thread.new do
@@ -286,9 +286,9 @@ class ProxyKeepAliveTest < Minitest::Test
     end
 
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("myapp.localhost", "127.0.0.1:#{bport}", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     pport = server.addr[1]
     accept = Thread.new do
@@ -326,9 +326,9 @@ class ProxyKeepAliveTest < Minitest::Test
 
   def test_hop_loop_rejected_with_508
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("loop.localhost", "127.0.0.1:9", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     pport = server.addr[1]
     accept = Thread.new do
@@ -338,7 +338,7 @@ class ProxyKeepAliveTest < Minitest::Test
 
     sock = TCPSocket.new("127.0.0.1", pport)
     sock.write("GET / HTTP/1.1\r\nHost: loop.localhost\r\n" \
-               "X-Ask-Local-Hops: 5\r\nConnection: close\r\n\r\n")
+               "X-Yamine-Hops: 5\r\nConnection: close\r\n\r\n")
     response = sock.read
     assert_includes response, "508"
     assert_includes response, "Loop Detected"
@@ -365,9 +365,9 @@ class ProxyKeepAliveTest < Minitest::Test
     end
 
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("myapp.localhost", "127.0.0.1:#{bport}", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     pport = server.addr[1]
     accept = Thread.new do
@@ -424,9 +424,9 @@ class ProxyKeepAliveTest < Minitest::Test
     end
 
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("myapp.localhost", "127.0.0.1:#{bport}", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     pport = server.addr[1]
     accept = Thread.new do
@@ -485,12 +485,12 @@ class ProxyTlsEndToEndTest < Minitest::Test
       end
     end
 
-    store = Ask::Local::RouteStore.new(state)
+    store = Yamine::RouteStore.new(state)
     store.add_route("myapp.localhost", "127.0.0.1:#{bport}", 0, kind: "tcp")
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: true, state_dir: state)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: true, state_dir: state)
     raw = TCPServer.new("127.0.0.1", 0)
     port = raw.addr[1]
-    ssl_server = OpenSSL::SSL::SSLServer.new(raw, Ask::Local::Certs.server_context(state))
+    ssl_server = OpenSSL::SSL::SSLServer.new(raw, Yamine::Certs.server_context(state))
     accept = Thread.new do
       loop do
         begin
@@ -504,7 +504,7 @@ class ProxyTlsEndToEndTest < Minitest::Test
     sleep 0.3
 
     ca_cert = OpenSSL::X509::Certificate.new(
-      File.read(Ask::Local::Certs.ca_paths(state)[:cert]))
+      File.read(Yamine::Certs.ca_paths(state)[:cert]))
     store_ctx = OpenSSL::X509::Store.new
     store_ctx.add_cert(ca_cert)
 

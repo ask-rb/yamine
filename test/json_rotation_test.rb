@@ -6,12 +6,12 @@ require "json"
 class JsonOutputTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
-    @orig = ENV["ASK_LOCAL_STATE_DIR"]
-    ENV["ASK_LOCAL_STATE_DIR"] = @dir
+    @orig = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = @dir
   end
 
   def teardown
-    ENV["ASK_LOCAL_STATE_DIR"] = @orig
+    ENV["YAMINE_STATE_DIR"] = @orig
     FileUtils.remove_entry(@dir)
   end
 
@@ -20,7 +20,7 @@ class JsonOutputTest < Minitest::Test
     orig = $stdout
     $stdout = out
     code = begin
-      Ask::Local::CLI.run(args)
+      Yamine::CLI.run(args)
     rescue SystemExit => e
       e.status
     end
@@ -30,7 +30,7 @@ class JsonOutputTest < Minitest::Test
   end
 
   def test_list_json_stable_keys
-    store = Ask::Local::RouteStore.new(@dir)
+    store = Yamine::RouteStore.new(@dir)
     store.add_route("a.localhost", "127.0.0.1:4001", 0, kind: "tcp")
     code, out = run_cli("list", "--json")
     assert_equal 0, code
@@ -105,7 +105,7 @@ class LogRotationTest < Minitest::Test
   def test_rotates_oversize_log
     path = File.join(@dir, "proxy.log")
     File.write(path, "x" * 100)
-    Ask::Local::Log.rotate(path, max_bytes: 10)
+    Yamine::Log.rotate(path, max_bytes: 10)
     assert File.file?("#{path}.1")
     refute File.file?(path)
     assert_equal "x" * 100, File.read("#{path}.1")
@@ -114,7 +114,7 @@ class LogRotationTest < Minitest::Test
   def test_leaves_small_log_alone
     path = File.join(@dir, "proxy.log")
     File.write(path, "hi")
-    Ask::Local::Log.rotate(path, max_bytes: 10_000)
+    Yamine::Log.rotate(path, max_bytes: 10_000)
     assert File.file?(path)
     refute File.file?("#{path}.1")
   end
@@ -122,7 +122,7 @@ class LogRotationTest < Minitest::Test
   def test_open_append_rotates_first
     path = File.join(@dir, "app.log")
     File.write(path, "y" * 100)
-    f = Ask::Local::Log.open_append(path, max_bytes: 10)
+    f = Yamine::Log.open_append(path, max_bytes: 10)
     f.write("new\n")
     f.close
     assert_equal "new\n", File.read(path)
@@ -131,16 +131,16 @@ class LogRotationTest < Minitest::Test
 
   def test_disk_usage_and_human_bytes
     File.write(File.join(@dir, "a.log"), "12345")
-    assert_equal 5, Ask::Local::Log.disk_usage(@dir)
-    assert_equal "5 B", Ask::Local::Log.human_bytes(5)
-    assert_equal "2.0 KB", Ask::Local::Log.human_bytes(2048)
-    assert_equal "3.0 MB", Ask::Local::Log.human_bytes(3 * 1024 * 1024)
+    assert_equal 5, Yamine::Log.disk_usage(@dir)
+    assert_equal "5 B", Yamine::Log.human_bytes(5)
+    assert_equal "2.0 KB", Yamine::Log.human_bytes(2048)
+    assert_equal "3.0 MB", Yamine::Log.human_bytes(3 * 1024 * 1024)
   end
 
   def test_doctor_disk_warns_on_bloat
-    store = Ask::Local::RouteStore.new(@dir)
+    store = Yamine::RouteStore.new(@dir)
     File.write(File.join(@dir, "proxy.log"), "z" * 10)
-    check = Ask::Local::Doctor.check_disk(store)
+    check = Yamine::Doctor.check_disk(store)
     assert check.ok
     assert_includes check.message, "B"
   end

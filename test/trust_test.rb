@@ -3,8 +3,8 @@
 require_relative "test_helper"
 
 # untrust on macOS/Windows must not raise NameError: the CA common name
-# lives in Ask::Local::Certs, and removal has to reach it (regression:
-# bare CA_COMMON_NAME raised NameError, so `ask-local clean` crashed
+# lives in Yamine::Certs, and removal has to reach it (regression:
+# bare CA_COMMON_NAME raised NameError, so `yamine clean` crashed
 # mid-untrust).
 #
 # These tests are deliberately hermetic: no `security`/`certutil`
@@ -15,22 +15,22 @@ require_relative "test_helper"
 # references the qualified name.
 class TrustTest < Minitest::Test
   def test_ca_common_name_is_reachable_from_trust_source
-    source = File.read(File.join(__dir__, "..", "lib", "ask", "local", "trust.rb"))
+    source = File.read(File.join(__dir__, "..", "lib", "yamine", "trust.rb"))
 
     assert_includes source, "Certs::CA_COMMON_NAME",
       "Trust.untrust must reference the CA common name through Certs (bare CA_COMMON_NAME raises NameError)"
   end
 
   def test_ca_common_name_constant_resolves
-    assert_equal "Ask Local CA", Ask::Local::Certs::CA_COMMON_NAME
+    assert_equal "Ask Local CA", Yamine::Certs::CA_COMMON_NAME
   end
 
   def test_untrust_guards_unknown_platform_without_touching_keychain
     # platform :unknown short-circuits before any subprocess; proving the
     # method is safe to call and returns a structured result, not a raise.
-    Ask::Local::Trust.stubs(:platform).returns(:unknown)
+    Yamine::Trust.stubs(:platform).returns(:unknown)
 
-    result = Ask::Local::Trust.untrust(Dir.mktmpdir)
+    result = Yamine::Trust.untrust(Dir.mktmpdir)
 
     assert result.is_a?(Hash), "untrust must return a result hash on unsupported platforms"
     refute_includes result[:error].to_s, "NameError"

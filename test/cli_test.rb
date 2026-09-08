@@ -9,14 +9,14 @@ require_relative "test_helper"
 class CLITest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
-    @orig_state = ENV["ASK_LOCAL_STATE_DIR"]
-    ENV["ASK_LOCAL_STATE_DIR"] = @dir
-    Ask::Local::Hosts.stubs(:unresolved).returns([])
+    @orig_state = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = @dir
+    Yamine::Hosts.stubs(:unresolved).returns([])
   end
 
   def teardown
     FileUtils.remove_entry(@dir)
-    ENV["ASK_LOCAL_STATE_DIR"] = @orig_state
+    ENV["YAMINE_STATE_DIR"] = @orig_state
   end
 
   def run_cli(*args)
@@ -24,7 +24,7 @@ class CLITest < Minitest::Test
     orig = $stdout
     $stdout = out
     code = begin
-      Ask::Local::CLI.run(args)
+      Yamine::CLI.run(args)
     rescue SystemExit => e
       e.status
     end
@@ -36,13 +36,13 @@ class CLITest < Minitest::Test
   def test_help
     code, out = run_cli("--help")
     assert_equal 0, code
-    assert_includes out, "ask-local"
+    assert_includes out, "yamine"
   end
 
   def test_version
     code, out = run_cli("--version")
     assert_equal 0, code
-    assert_includes out, Ask::Local::VERSION
+    assert_includes out, Yamine::VERSION
   end
 
   def test_get_prints_url
@@ -101,14 +101,14 @@ class CLITest < Minitest::Test
     FileUtils.mkdir_p(File.join(@dir, "config"))
     File.write(File.join(@dir, "config", "local.yml"),
       "service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
-    ENV["ASK_LOCAL_VARIANT"] = "fix-ui"
+    ENV["YAMINE_VARIANT"] = "fix-ui"
     Dir.chdir(@dir) do
       c, o = run_cli("get", "backend")
       assert_equal 0, c
       assert_includes o, "fix-ui.backend.localhost"
     end
   ensure
-    ENV.delete("ASK_LOCAL_VARIANT")
+    ENV.delete("YAMINE_VARIANT")
   end
 
   def test_alias_accepts_full_hostname
@@ -118,13 +118,13 @@ class CLITest < Minitest::Test
     assert_includes out, "web.preview.example.com"
   end
 
-  def test_alias_uses_ask_local_tld
-    ENV["ASK_LOCAL_TLD"] = "preview.example.com"
+  def test_alias_uses_yamine_tld
+    ENV["YAMINE_TLD"] = "preview.example.com"
     run_cli("alias", "dockerapp", "8080")
     _c, out = run_cli("list")
     assert_includes out, "dockerapp.preview.example.com"
   ensure
-    ENV.delete("ASK_LOCAL_TLD")
+    ENV.delete("YAMINE_TLD")
   end
 
   def test_unknown_flag_errors

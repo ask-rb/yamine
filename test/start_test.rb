@@ -7,11 +7,11 @@ class StartCommandTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
     @state = Dir.mktmpdir
-    ENV["ASK_LOCAL_STATE_DIR"] = @state
+    ENV["YAMINE_STATE_DIR"] = @state
   end
 
   def teardown
-    ENV.delete("ASK_LOCAL_STATE_DIR")
+    ENV.delete("YAMINE_STATE_DIR")
     FileUtils.remove_entry(@dir) rescue nil
     FileUtils.remove_entry(@state) rescue nil
   end
@@ -32,61 +32,61 @@ class StartCommandTest < Minitest::Test
   end
 
   def test_help_lists_usage_and_examples
-    _code, out, = capture { Ask::Local::CLI::SystemCommand.start(Ask::Local::CLI::Context.new, ["--help"]) }
-    assert_includes out, "ask-local start"
-    assert_includes out, "ask-local start myapp"
+    _code, out, = capture { Yamine::CLI::SystemCommand.start(Yamine::CLI::Context.new, ["--help"]) }
+    assert_includes out, "yamine start"
+    assert_includes out, "yamine start myapp"
     assert_includes out, "--name <name>"
   end
 
   def test_fast_path_skips_setup_when_healthy
     # All doctor checks ok => ensure_workstation! must NOT be called.
-    Ask::Local::Doctor.stubs(:run).returns([
-      Ask::Local::Doctor::Check.new(name: "state", ok: true, message: "writable"),
-      Ask::Local::Doctor::Check.new(name: "disk", ok: true, message: "uses 0 B"),
-      Ask::Local::Doctor::Check.new(name: "proxy", ok: true, message: "listening on port 443"),
-      Ask::Local::Doctor::Check.new(name: "routes", ok: true, message: "no active routes"),
-      Ask::Local::Doctor::Check.new(name: "dns", ok: true, message: "no routes to resolve"),
-      Ask::Local::Doctor::Check.new(name: "ca", ok: true, message: "CA trusted")
+    Yamine::Doctor.stubs(:run).returns([
+      Yamine::Doctor::Check.new(name: "state", ok: true, message: "writable"),
+      Yamine::Doctor::Check.new(name: "disk", ok: true, message: "uses 0 B"),
+      Yamine::Doctor::Check.new(name: "proxy", ok: true, message: "listening on port 443"),
+      Yamine::Doctor::Check.new(name: "routes", ok: true, message: "no active routes"),
+      Yamine::Doctor::Check.new(name: "dns", ok: true, message: "no routes to resolve"),
+      Yamine::Doctor::Check.new(name: "ca", ok: true, message: "CA trusted")
     ])
-    Ask::Local::CLI::SystemCommand.expects(:ensure_workstation!).never
+    Yamine::CLI::SystemCommand.expects(:ensure_workstation!).never
     # Stub the boot so we don't actually try to bind a port.
-    Ask::Local::CLI::BootCommand.expects(:run_inferred)
-      .with { |ctx, _args| ctx.is_a?(Ask::Local::CLI::Context) }
+    Yamine::CLI::BootCommand.expects(:run_inferred)
+      .with { |ctx, _args| ctx.is_a?(Yamine::CLI::Context) }
       .returns(nil)
 
-    Ask::Local::CLI::SystemCommand.start(Ask::Local::CLI::Context.new, [])
+    Yamine::CLI::SystemCommand.start(Yamine::CLI::Context.new, [])
   end
 
   def test_triggers_setup_when_doctor_fails
-    Ask::Local::Doctor.stubs(:run).returns([
-      Ask::Local::Doctor::Check.new(name: "proxy", ok: false, message: "not running")
+    Yamine::Doctor.stubs(:run).returns([
+      Yamine::Doctor::Check.new(name: "proxy", ok: false, message: "not running")
     ])
-    Ask::Local::CLI::SystemCommand.expects(:ensure_workstation!).with { |ctx| ctx.is_a?(Ask::Local::CLI::Context) }
-    Ask::Local::CLI::BootCommand.expects(:run_inferred).returns(nil)
+    Yamine::CLI::SystemCommand.expects(:ensure_workstation!).with { |ctx| ctx.is_a?(Yamine::CLI::Context) }
+    Yamine::CLI::BootCommand.expects(:run_inferred).returns(nil)
 
-    Ask::Local::CLI::SystemCommand.start(Ask::Local::CLI::Context.new, [])
+    Yamine::CLI::SystemCommand.start(Yamine::CLI::Context.new, [])
   end
 
   def test_ensure_workstation_covers_ca_proxy_and_hosts
-    ctx = Ask::Local::CLI::Context.new
-    Ask::Local::Certs.stubs(:trusted?).returns(false)
-    Ask::Local::Trust.stubs(:trust).returns({ trusted: true })
-    Ask::Local::ProxyControl.stubs(:listening?).returns(false)
-    Ask::Local::ProxyControl.stubs(:root?).returns(false)
+    ctx = Yamine::CLI::Context.new
+    Yamine::Certs.stubs(:trusted?).returns(false)
+    Yamine::Trust.stubs(:trust).returns({ trusted: true })
+    Yamine::ProxyControl.stubs(:listening?).returns(false)
+    Yamine::ProxyControl.stubs(:root?).returns(false)
     ctx.stubs(:interactive?).returns(false)
-    code, _out, err = capture { Ask::Local::CLI::SystemCommand.ensure_workstation!(ctx) }
+    code, _out, err = capture { Yamine::CLI::SystemCommand.ensure_workstation!(ctx) }
     assert_equal 1, code
-    assert_includes err, "ask-local setup"
+    assert_includes err, "yamine setup"
   end
 
   def test_setup_reached_via_noninteractive_proxy_error_points_at_setup
-    Ask::Local::Certs.stubs(:trusted?).returns(true)
-    Ask::Local::ProxyControl.stubs(:listening?).returns(false)
-    Ask::Local::CLI::Context.any_instance.stubs(:interactive?).returns(false)
-    ctx = Ask::Local::CLI::Context.new
+    Yamine::Certs.stubs(:trusted?).returns(true)
+    Yamine::ProxyControl.stubs(:listening?).returns(false)
+    Yamine::CLI::Context.any_instance.stubs(:interactive?).returns(false)
+    ctx = Yamine::CLI::Context.new
     _code, _out, err = capture do
-      Ask::Local::CLI::SystemCommand.ensure_workstation!(ctx)
+      Yamine::CLI::SystemCommand.ensure_workstation!(ctx)
     end
-    assert_includes err, "ask-local setup"
+    assert_includes err, "yamine setup"
   end
 end

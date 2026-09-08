@@ -5,9 +5,9 @@ require_relative "test_helper"
 class SupervisorTest < Minitest::Test
   def setup
     @state = Dir.mktmpdir
-    @store = Ask::Local::RouteStore.new(@state)
+    @store = Yamine::RouteStore.new(@state)
     @app_dir = Dir.mktmpdir
-    @runner = Ask::Local::Runner.new(store: @store, on_log: ->(m) {})
+    @runner = Yamine::Runner.new(store: @store, on_log: ->(m) {})
     @listeners = []
     @extra_pids = []
     @events = []
@@ -21,7 +21,7 @@ class SupervisorTest < Minitest::Test
   end
 
   def supervisor(idle_timeout: 900, interval: 5, runner: @runner)
-    Ask::Local::Supervisor.new(store: @store, runner: runner,
+    Yamine::Supervisor.new(store: @store, runner: runner,
       interval: interval, idle_timeout: idle_timeout,
       on_event: ->(m) { @events << m })
   end
@@ -88,7 +88,7 @@ class SupervisorTest < Minitest::Test
     fake_runner.define_singleton_method(:boot_supervised) do |name:, hostname:, url:, dir:|
       boot_count += 1
       @reboot_listener = UNIXServer.new(route["target"])
-      Ask::Local::Runner::App.new(name: name, hostname: hostname, url: url,
+      Yamine::Runner::App.new(name: name, hostname: hostname, url: url,
         pid: 0, target: route["target"], kind: "socket", command: nil)
     end
     Minitest.after_run { (@reboot_listener&.close rescue nil) }

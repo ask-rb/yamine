@@ -4,7 +4,7 @@ require_relative "test_helper"
 
 class ProxyRoutingTest < Minitest::Test
   def proxy
-    @proxy ||= Ask::Local::Proxy.new(store: nil)
+    @proxy ||= Yamine::Proxy.new(store: nil)
   end
 
   def routes
@@ -37,8 +37,8 @@ class ProxyRoutingTest < Minitest::Test
 
   def test_hop_limit
     assert_nil proxy.check_hops({})
-    assert_nil proxy.check_hops({ "x-ask-local-hops" => "4" })
-    assert_equal 5, proxy.check_hops({ "x-ask-local-hops" => "5" })
+    assert_nil proxy.check_hops({ "x-yamine-hops" => "4" })
+    assert_equal 5, proxy.check_hops({ "x-yamine-hops" => "5" })
   end
 end
 
@@ -57,10 +57,10 @@ class ProxyLiveTest < Minitest::Test
     end
 
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("myapp.localhost", "127.0.0.1:#{backend_port}", 0, kind: "tcp")
 
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     proxy_port = server.addr[1]
     Thread.new do
@@ -80,10 +80,10 @@ class ProxyLiveTest < Minitest::Test
 
   def test_unknown_host_404_lists_routes
     dir = Dir.mktmpdir
-    store = Ask::Local::RouteStore.new(dir)
+    store = Yamine::RouteStore.new(dir)
     store.add_route("myapp.localhost", "127.0.0.1:9", 0, kind: "tcp")
 
-    proxy = Ask::Local::Proxy.new(store: store, port: 0, tls: false)
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
     server = TCPServer.new("127.0.0.1", 0)
     proxy_port = server.addr[1]
     Thread.new do

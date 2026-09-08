@@ -3,7 +3,7 @@
 ## Development Setup
 
 ```bash
-git clone <repo-url> && cd ask-rb/ask-local
+git clone <repo-url> && cd ask-rb/yamine
 bundle install
 ```
 

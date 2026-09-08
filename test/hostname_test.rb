@@ -3,7 +3,7 @@
 require_relative "test_helper"
 
 class HostnameTest < Minitest::Test
-  H = Ask::Local::Hostname
+  H = Yamine::Hostname
 
   def test_bare_app
     assert_equal ["myapp.localhost"], H.build(app: "myapp")

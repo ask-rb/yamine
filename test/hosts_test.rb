@@ -17,25 +17,25 @@ class HostsTest < Minitest::Test
   end
 
   def test_synced_true_when_managed_block_present
-    Ask::Local::Hosts.sync(["myapp.localhost"], @path)
+    Yamine::Hosts.sync(["myapp.localhost"], @path)
 
-    assert Ask::Local::Hosts.synced?(["myapp.localhost"], @path)
+    assert Yamine::Hosts.synced?(["myapp.localhost"], @path)
   end
 
   def test_synced_false_when_block_missing
-    refute Ask::Local::Hosts.synced?(["myapp.localhost"], @path)
+    refute Yamine::Hosts.synced?(["myapp.localhost"], @path)
   end
 
   def test_synced_false_when_block_has_different_hosts
-    Ask::Local::Hosts.sync(["other.localhost"], @path)
+    Yamine::Hosts.sync(["other.localhost"], @path)
 
-    refute Ask::Local::Hosts.synced?(["myapp.localhost"], @path)
+    refute Yamine::Hosts.synced?(["myapp.localhost"], @path)
   end
 
   def test_synced_unaffected_by_unmanaged_lines
     File.write(@path, "127.0.0.1 localhost\n")
-    Ask::Local::Hosts.sync(["myapp.localhost"], @path)
+    Yamine::Hosts.sync(["myapp.localhost"], @path)
 
-    assert Ask::Local::Hosts.synced?(["myapp.localhost"], @path)
+    assert Yamine::Hosts.synced?(["myapp.localhost"], @path)
   end
 end

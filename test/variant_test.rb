@@ -14,31 +14,31 @@ class VariantTest < Minitest::Test
   end
 
   def test_explicit_flag_wins
-    variant, source = Ask::Local::Variant.resolve(@dir, explicit: "Demo_1")
+    variant, source = Yamine::Variant.resolve(@dir, explicit: "Demo_1")
     assert_equal "demo-1", variant
     assert_equal "flag", source
   end
 
   def test_env_var
-    ENV["ASK_LOCAL_VARIANT"] = "staging"
-    variant, source = Ask::Local::Variant.resolve(@dir)
+    ENV["YAMINE_VARIANT"] = "staging"
+    variant, source = Yamine::Variant.resolve(@dir)
     assert_equal "staging", variant
-    assert_equal "ASK_LOCAL_VARIANT", source
+    assert_equal "YAMINE_VARIANT", source
   end
 
   def test_no_git_no_variant
-    assert_nil Ask::Local::Variant.resolve(@dir)
+    assert_nil Yamine::Variant.resolve(@dir)
   end
 
   def test_main_branch_never_prefixes
     init_repo(@dir, branch: "main")
-    assert_nil Ask::Local::Variant.resolve(@dir, use_branch: true)
+    assert_nil Yamine::Variant.resolve(@dir, use_branch: true)
   end
 
   def test_feature_branch_prefixes_only_when_opted_in
     init_repo(@dir, branch: "feature/login-flow")
-    assert_nil Ask::Local::Variant.resolve(@dir)
-    variant, source = Ask::Local::Variant.resolve(@dir, use_branch: true)
+    assert_nil Yamine::Variant.resolve(@dir)
+    variant, source = Yamine::Variant.resolve(@dir, use_branch: true)
     assert_equal "login-flow", variant
     assert_equal "git branch", source
   end
@@ -47,7 +47,7 @@ class VariantTest < Minitest::Test
     init_repo(@dir, branch: "main")
     system("git", "-C", @dir, "checkout", "-q", "--detach", "HEAD",
       out: File::NULL, err: File::NULL)
-    assert_nil Ask::Local::Variant.resolve(@dir, use_branch: true)
+    assert_nil Yamine::Variant.resolve(@dir, use_branch: true)
   end
 
   def test_linked_worktree_gets_prefix
@@ -59,17 +59,17 @@ class VariantTest < Minitest::Test
       out: File::NULL, err: File::NULL)
     skip "git worktree unsupported here" unless ok
 
-    variant, source = Ask::Local::Variant.resolve(work)
+    variant, source = Yamine::Variant.resolve(work)
     assert_equal "fix-ui", variant
     assert_equal "git worktree", source
 
     # Main checkout keeps the bare name.
-    assert_nil Ask::Local::Variant.resolve(main)
+    assert_nil Yamine::Variant.resolve(main)
   end
 
   def test_apply
-    assert_equal "fix.myapp", Ask::Local::Variant.apply("myapp", "fix")
-    assert_equal "myapp", Ask::Local::Variant.apply("myapp", nil)
+    assert_equal "fix.myapp", Yamine::Variant.apply("myapp", "fix")
+    assert_equal "myapp", Yamine::Variant.apply("myapp", nil)
   end
 
   private

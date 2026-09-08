@@ -5,7 +5,7 @@ require_relative "test_helper"
 class RouteStoreTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
-    @store = Ask::Local::RouteStore.new(@dir)
+    @store = Yamine::RouteStore.new(@dir)
   end
 
   def teardown
@@ -31,7 +31,7 @@ class RouteStoreTest < Minitest::Test
     other = spawn("sleep", "30", out: File::NULL, err: File::NULL)
     begin
       @store.add_route("clash.localhost", "127.0.0.1:4001", other, kind: "tcp")
-      err = assert_raises(Ask::Local::RouteConflictError) do
+      err = assert_raises(Yamine::RouteConflictError) do
         @store.add_route("clash.localhost", "127.0.0.1:4002", Process.pid, kind: "tcp")
       end
       assert_equal "clash.localhost", err.hostname
@@ -66,7 +66,7 @@ class RouteStoreTest < Minitest::Test
 
   def test_corrupt_file_warns_and_returns_empty
     warnings = []
-    store = Ask::Local::RouteStore.new(@dir, on_warning: ->(m) { warnings << m })
+    store = Yamine::RouteStore.new(@dir, on_warning: ->(m) { warnings << m })
     File.write(File.join(@dir, "routes.json"), "{nope")
     assert_equal [], store.load_routes
     assert_match(/invalid JSON/, warnings.first)

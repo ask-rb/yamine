@@ -1,8 +1,18 @@
 # Changelog
 
+## [0.3.0] — Unreleased
+
+Renamed from `ask-local` to **`yamine`** (يمين, "right hand" — the local
+half of the Kamal pair; see README for the full story). Fresh gem, new
+history: starts at 0.3.0 to honor the 0.2.x ask-local lineage without
+claiming continuity. `Ask::Local` → `Yamine`, `ask-local`/`askl` binaries
+→ `yamine`, `ASK_LOCAL_*` env → `YAMINE_*`, state dir `~/.ask-local` →
+`~/.yamine`, skill `ask-local` → `yamine`, health headers
+`x-ask-local*` → `x-yamine*`. No migration path — no existing users.
+
 ## [0.2.1] — 2026-09-08
 
-Patch release focused on making `ask-local setup` dependable end-to-end:
+Patch release focused on making `yamine setup` dependable end-to-end:
 it now installs the 443 service and *finishes* (hosts + doctor), works
 passwordless for agents, survives first-run edge cases, and shows what it
 is doing while it works.
@@ -31,14 +41,14 @@ is doing while it works.
 
 ### Added
 
-- `ask-local sudoers` — prints the scoped NOPASSWD rules so agents and
+- `yamine sudoers` — prints the scoped NOPASSWD rules so agents and
   CI can install and run the 443 service without a TTY. Non-interactive
   elevation uses `sudo -n` (never prompts) and points at the grant when
   it is missing; interactive failures just say re-run.
 - The root install syncs `/etc/hosts` under elevation, so Safari works
   the moment setup finishes. `setup`'s hosts step verifies the block is
   already present instead of failing unprivileged on re-runs, and
-  `ask-local hosts sync` re-runs itself elevated when the direct write
+  `yamine hosts sync` re-runs itself elevated when the direct write
   needs root.
 - The CA is trusted into the System keychain silently while elevated
   (all users, no GUI popup); unprivileged trust keeps the login
@@ -85,9 +95,9 @@ is doing while it works.
 ### Added
 
 - Daemon-owned supervision (puma-dev model): managed apps idle-stop
-  after 15 minutes (`ASK_LOCAL_IDLE_TIMEOUT`), stop when tmp/restart.txt
+  after 15 minutes (`YAMINE_IDLE_TIMEOUT`), stop when tmp/restart.txt
   changes, and boot transparently on the next request.
-- `ask-local stop` (exit 0 stopped / 2 no route / 3 backend already
+- `yamine stop` (exit 0 stopped / 2 no route / 3 backend already
   gone), `restart`, `log [-f] [n]`, `status` (effective naming context),
   `open [name]` (browser). `list` shows backend liveness per route.
 - Root-owned `service install` (launchd/systemd) binding 80/443 at boot
@@ -95,30 +105,30 @@ is doing while it works.
 - All root write paths chown state back to the invoking user; `doctor`
   reports an unwritable state dir plainly. The privileged auto-start
   re-execs under `sudo` with the correct state dir.
-- Bounded proxy concurrency (`ASK_LOCAL_MAX_CONNECTIONS`, 503 past the
+- Bounded proxy concurrency (`YAMINE_MAX_CONNECTIONS`, 503 past the
   cap), mtime-based route cache (no TTL race for boot-then-curl), IPv4+IPv6
   loopback listeners, dual-stack `ours?` health check.
 - `get` inherits variant/TLD context from the current directory
   (`get backend` in a fix-ui worktree -> fix-ui.backend.localhost);
   `--service/--variant/--tld` overrides.
-- `alias` accepts full hostnames on any TLD and honors ASK_LOCAL_TLD.
+- `alias` accepts full hostnames on any TLD and honors YAMINE_TLD.
 - `kamal` snippet resolves the app from the directory; `--app/--domain`
-  flags and ASK_LOCAL_KAMAL_DOMAIN.
+  flags and YAMINE_KAMAL_DOMAIN.
 - `clean` untrusts the CA from the OS trust store.
 - `--proc <name>` picks a specific Procfile process.
-- Ships the `ask-local` agent skill (ask/skills/ask-local/SKILL.md).
+- Ships the `yamine` agent skill (ask/skills/yamine/SKILL.md).
 - `test:e2e` / `test:all` rake tasks; CI matrix (3.2/3.3/3.4/4.0),
   macOS e2e leg, fixture-sweep job.
 - Ownership module, framework fixtures (sinatra-modular,
   foreman-`$PORT`, hanami2 slice layout, jekyll livereload), SKILL.md
   "when NOT to use" section, README non-goals, vite/Shakapacker recipe.
-- Host authorization patterns default TLDs from `ASK_LOCAL_TLD`.
+- Host authorization patterns default TLDs from `YAMINE_TLD`.
 - WebSocket Upgrade end-to-end test (RFC 6455 handshake + frame echo),
   hop-loop 508 rejection, chunked framing, and spinning-loop fix.
 
 ### Fixed
 
-- Daemon spawn and service install resolved the ask-local binary one
+- Daemon spawn and service install resolved the yamine binary one
   directory too high — `proxy start` failed outright; failures now
   include the proxy log tail.
 - Keep-alive connections now rewrite headers (X-Forwarded-Proto) on
@@ -142,19 +152,19 @@ is doing while it works.
 
 Patch release focused on workstation setup, URL correctness, and proxy reliability.
 
-### Added — `ask-local setup` & `ask-local start`
+### Added — `yamine setup` & `yamine start`
 
-- `ask-local setup` — one-shot workstation setup for clean
+- `yamine setup` — one-shot workstation setup for clean
   `https://<app>.localhost` URLs: trust the local CA, serve port 443
   (root launchd/systemd service when possible, sudo daemon otherwise),
   sync `/etc/hosts`, and verify with `doctor`. Each step reports
   `==>` / `ok` and the first failure aborts with the specific fix.
-- `ask-local start` — one-setup-and-go entry point: an idempotent
-  workstation-check-then-boot (`ask-local setup` if needed, then the
-  app). `ask-local` bare is an alias for it; `ask-local setup` stays for
+- `yamine start` — one-setup-and-go entry point: an idempotent
+  workstation-check-then-boot (`yamine setup` if needed, then the
+  app). `yamine` bare is an alias for it; `yamine setup` stays for
   explicit re-setup.
 - `askl` — shell-friendly alias binary (`bin/askl`, same entry point as
-  `bin/ask-local`). Keep `ask-local` in logs and docs so `grep` stays
+  `bin/yamine`). Keep `yamine` in logs and docs so `grep` stays
   useful.
 
 ### Added — DNS-rebinding & log hygiene
@@ -165,15 +175,15 @@ Patch release focused on workstation setup, URL correctness, and proxy reliabili
   follows custom domains. The `X-Ask-Local: 1` health header marks our
   proxy responses (including 404s) for the `ours?` probe.
 - Log rotation — `proxy.log` and per-app backend logs rotate at 5MB
-  (`ASK_LOCAL_LOG_MAX_BYTES`, one generation) before each write. A new
+  (`YAMINE_LOG_MAX_BYTES`, one generation) before each write. A new
   `doctor` disk-usage check warns past 100MB of state.
 
 ### Fixed
 
 - **Silent `:1355` URL fallback removed.** Privileged-port (443) bind
-  failure is now a hard error pointing at `ask-local setup`, never a
+  failure is now a hard error pointing at `yamine setup`, never a
   booted app on `https://app.localhost:1355` that silently corrupts
-  downstream consumers of `ASK_LOCAL_URL`. The only port-suffixed URLs
+  downstream consumers of `YAMINE_URL`. The only port-suffixed URLs
   are the ones you explicitly ask for (`proxy start -p 1355`).
 - **Health probe `130+?` hang fixed.** The TLS probe's `connect` sat
   outside the timeout: a TLS handshake against a foreign plain-HTTP
@@ -183,7 +193,7 @@ Patch release focused on workstation setup, URL correctness, and proxy reliabili
   header short-circuits as foreign — only silent servers wait for the
   timeout.
 - `start` dispatch was missing from the dispatcher despite being in
-  `SUBCOMMANDS`, so `ask-local start` fell through to `run_named` with
+  `SUBCOMMANDS`, so `yamine start` fell through to `run_named` with
   "start" as an app name. The kamal-help append drifted to a 6-space
   indent. Both are fixed and pinned by tests.
 - `base64` declared as a runtime dependency (it left the default gems in
@@ -209,11 +219,11 @@ Patch release focused on workstation setup, URL correctness, and proxy reliabili
 - Initial release: explicit-run reverse proxy giving every Ruby app a
   stable `https://<app>.localhost` URL.
 - Zero-flag name inference (Rails module, gemspec, package.json, git
-  root, directory) with `ask-local.json` overrides.
+  root, directory) with `yamine.json` overrides.
 - `{variant}.{service}.{app}.{tld}` hostname composition; linked-worktree
   branch prefixes; custom `--tld` including owned domains.
 - Managed Rack boot on unix sockets (rackup/TCP fallback); run mode with
-  `PORT`/`ASK_LOCAL_URL` injection; `Procfile.dev` and static-site
+  `PORT`/`YAMINE_URL` injection; `Procfile.dev` and static-site
   framework detection.
 - Local CA + per-host SNI certs (in-memory LRU), `trust`, `hosts sync`,
   `doctor`, `prune`, `alias`, `get`, `kamal` snippet.
@@ -224,7 +234,7 @@ Patch release focused on workstation setup, URL correctness, and proxy reliabili
 
 - Rails module inference kebab-cases CamelCase and digit runs:
   `Rails8Min` → `rails-8-min` (was `rails8min`).
-- Monorepo `ask-local.json` with an `apps:` map is discovered by walking
+- Monorepo `yamine.json` with an `apps:` map is discovered by walking
   up from the package directory.
 - `service: web` produces the bare `app.tld` (all other services prefix).
 - Puma 8 command shape (positional `config.ru`; `--rackup` was removed

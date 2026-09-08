@@ -4,10 +4,10 @@ require_relative "test_helper"
 
 class RailsModuleKebabTest < Minitest::Test
   def test_camelcase_boundaries_become_hyphens
-    assert_equal "rails-8-min", Ask::Local::Inference.parse_rails_module("module Rails8Min\nend")
-    assert_equal "my-app", Ask::Local::Inference.parse_rails_module("module MyApp\nend")
-    assert_equal "my-app", Ask::Local::Inference.parse_rails_module("module My_App\nend")
-    assert_nil Ask::Local::Inference.parse_rails_module("nothing here")
+    assert_equal "rails-8-min", Yamine::Inference.parse_rails_module("module Rails8Min\nend")
+    assert_equal "my-app", Yamine::Inference.parse_rails_module("module MyApp\nend")
+    assert_equal "my-app", Yamine::Inference.parse_rails_module("module My_App\nend")
+    assert_nil Yamine::Inference.parse_rails_module("nothing here")
   end
 end
 
@@ -39,13 +39,13 @@ class MonorepoRootConfigTest < Minitest::Test
   end
 
   def test_subdir_uses_root_config
-    r = Ask::Local::Resolver.resolve(File.join(@root, "web"))
+    r = Yamine::Resolver.resolve(File.join(@root, "web"))
     assert_equal "shop", r.app
-    assert_includes Ask::Local::Resolver.hostnames(r), "shop.localhost"
+    assert_includes Yamine::Resolver.hostnames(r), "shop.localhost"
   end
 
   def test_unlisted_subdir_falls_back_to_inference
-    r = Ask::Local::Resolver.resolve(File.join(@root, "other"))
+    r = Yamine::Resolver.resolve(File.join(@root, "other"))
     assert_equal "shop", r.app  # walks up to root config.local.yml
   end
 
@@ -53,7 +53,7 @@ class MonorepoRootConfigTest < Minitest::Test
     overlay = File.join(@root, "config", "local.staging.yml")
     FileUtils.mkdir_p(File.dirname(overlay))
     File.write(overlay, "proxy:\n  tld: staging.example.com")
-    r = Ask::Local::Resolver.resolve(File.join(@root, "web"), variant: "staging")
+    r = Yamine::Resolver.resolve(File.join(@root, "web"), variant: "staging")
     assert_equal "staging.example.com", r.tld
     assert_equal "shop", r.app
   end
@@ -62,15 +62,15 @@ end
 class WebServiceBareTest < Minitest::Test
   def test_web_service_stays_bare
     assert_equal ["shop.localhost"],
-      Ask::Local::Hostname.build(app: "shop", service: "web")
+      Yamine::Hostname.build(app: "shop", service: "web")
     assert_equal ["api.shop.localhost"],
-      Ask::Local::Hostname.build(app: "shop", service: "api")
+      Yamine::Hostname.build(app: "shop", service: "api")
   end
 end
 
 class PortInjectionTest < Minitest::Test
   def cli
-    @cli ||= Ask::Local::CLI.new
+    @cli ||= Yamine::CLI.new
   end
 
   def test_jekyll_gets_port_and_host
@@ -105,7 +105,7 @@ class ProcfileSelectTest < Minitest::Test
   end
 
   def cli
-    @cli ||= Ask::Local::CLI.new
+    @cli ||= Yamine::CLI.new
   end
 
   def in_dir(&block)
@@ -136,15 +136,15 @@ class ProcfileSelectTest < Minitest::Test
 end
 
 class SkillTest < Minitest::Test
-  def test_skill_ships_in_ask_local
-    path = File.expand_path("../lib/ask/skills/ask-local/SKILL.md", __dir__)
+  def test_skill_ships_in_yamine
+    path = File.expand_path("../lib/ask/skills/yamine/SKILL.md", __dir__)
     assert File.file?(path)
     content = File.read(path)
-    assert_includes content, "name: ask-local"
+    assert_includes content, "name: yamine"
     assert_includes content, "description:"
-    assert_includes content, "ASK_LOCAL_URL"
+    assert_includes content, "YAMINE_URL"
     assert_includes content, "config/local.yml"
-    assert_includes content, "ask-local init"
+    assert_includes content, "yamine init"
     refute_includes content, "--proc"  # old Procfile-era flag gone
   end
 end

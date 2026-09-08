@@ -5,13 +5,13 @@ require_relative "test_helper"
 class SetupCommandTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
-    @orig = ENV["ASK_LOCAL_STATE_DIR"]
-    ENV["ASK_LOCAL_STATE_DIR"] = @dir
-    @ctx = Ask::Local::CLI::Context.new
+    @orig = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = @dir
+    @ctx = Yamine::CLI::Context.new
   end
 
   def teardown
-    ENV["ASK_LOCAL_STATE_DIR"] = @orig
+    ENV["YAMINE_STATE_DIR"] = @orig
     FileUtils.remove_entry(@dir)
   end
 
@@ -31,7 +31,7 @@ class SetupCommandTest < Minitest::Test
   end
 
   def test_help_describes_default_and_no_service_paths
-    _code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, ["--help"]) }
+    _code, out, = capture { Yamine::CLI::SystemCommand.setup(@ctx, ["--help"]) }
     assert_includes out, "Default: install the root proxy service on 443"
     assert_includes out, "--no-service"
     assert_includes out, "syncing /etc/hosts"
@@ -39,11 +39,11 @@ class SetupCommandTest < Minitest::Test
   end
 
   def stubbed_root_service_install
-    Ask::Local::ProxyControl.stubs(:root?).returns(false)
-    Ask::Local::Command.stubs(:run).returns(true)
-    Ask::Local::ProxyControl.stubs(:ours?).returns(true)
-    Ask::Local::Doctor.stubs(:run).returns([])
-    Ask::Local::Doctor.stubs(:print).returns(0)
+    Yamine::ProxyControl.stubs(:root?).returns(false)
+    Yamine::Command.stubs(:run).returns(true)
+    Yamine::ProxyControl.stubs(:ours?).returns(true)
+    Yamine::Doctor.stubs(:run).returns([])
+    Yamine::Doctor.stubs(:print).returns(0)
   end
 
   def write_route(hostname)
@@ -58,7 +58,7 @@ class SetupCommandTest < Minitest::Test
     # sync and doctor, and print Setup complete.
     stubbed_root_service_install
 
-    code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
+    code, out, = capture { Yamine::CLI::SystemCommand.setup(@ctx, []) }
     assert_equal 0, code
     assert_includes out, "1/3 Installing proxy service on port 443 (trusts CA)"
     assert_includes out, "Installing system service (sudo required)"
@@ -70,10 +70,10 @@ class SetupCommandTest < Minitest::Test
   def test_hosts_step_writes_when_routes_exist_and_not_synced
     write_route("myapp.localhost")
     stubbed_root_service_install
-    Ask::Local::Hosts.stubs(:synced?).returns(false)
-    Ask::Local::Hosts.expects(:sync).with(["myapp.localhost"]).returns(true)
+    Yamine::Hosts.stubs(:synced?).returns(false)
+    Yamine::Hosts.expects(:sync).with(["myapp.localhost"]).returns(true)
 
-    code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
+    code, out, = capture { Yamine::CLI::SystemCommand.setup(@ctx, []) }
     assert_equal 0, code
     assert_includes out, "Setup complete"
   end
@@ -81,21 +81,21 @@ class SetupCommandTest < Minitest::Test
   def test_hosts_step_skips_write_when_block_already_synced
     write_route("myapp.localhost")
     stubbed_root_service_install
-    Ask::Local::Hosts.stubs(:synced?).returns(true)
-    Ask::Local::Hosts.expects(:sync).never
+    Yamine::Hosts.stubs(:synced?).returns(true)
+    Yamine::Hosts.expects(:sync).never
 
-    code, _, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
+    code, _, = capture { Yamine::CLI::SystemCommand.setup(@ctx, []) }
     assert_equal 0, code
   end
 
   def test_wait_for_ours_animates_while_proxy_starts
-    Ask::Local::ProxyControl.stubs(:ours?).returns(false).then.returns(true)
+    Yamine::ProxyControl.stubs(:ours?).returns(false).then.returns(true)
 
     out = StringIO.new
     orig = $stdout
     $stdout = out
     ok = begin
-      Ask::Local::CLI::SystemCommand.wait_for_ours(@ctx, 443, tls: true)
+      Yamine::CLI::SystemCommand.wait_for_ours(@ctx, 443, tls: true)
     ensure
       $stdout = orig
     end
@@ -107,14 +107,14 @@ class SetupCommandTest < Minitest::Test
   end
 
   def test_wait_for_ours_spins_on_a_terminal
-    Ask::Local::ProxyControl.stubs(:ours?).returns(false).then.returns(true)
+    Yamine::ProxyControl.stubs(:ours?).returns(false).then.returns(true)
 
     out = StringIO.new
     out.stubs(:tty?).returns(true)
     orig = $stdout
     $stdout = out
     ok = begin
-      Ask::Local::CLI::SystemCommand.wait_for_ours(@ctx, 443, tls: true)
+      Yamine::CLI::SystemCommand.wait_for_ours(@ctx, 443, tls: true)
     ensure
       $stdout = orig
     end
@@ -128,13 +128,13 @@ class SetupCommandTest < Minitest::Test
   end
 
   def test_no_service_flag_uses_sudo_daemon
-    Ask::Local::Trust.stubs(:trust).returns({ trusted: true })
-    Ask::Local::CLI::SystemCommand.stubs(:ensure_sudo_daemon).returns(true)
-    Ask::Local::Hosts.stubs(:sync).returns(true)
-    Ask::Local::Doctor.stubs(:run).returns([])
-    Ask::Local::Doctor.stubs(:print).returns(0)
+    Yamine::Trust.stubs(:trust).returns({ trusted: true })
+    Yamine::CLI::SystemCommand.stubs(:ensure_sudo_daemon).returns(true)
+    Yamine::Hosts.stubs(:sync).returns(true)
+    Yamine::Doctor.stubs(:run).returns([])
+    Yamine::Doctor.stubs(:print).returns(0)
 
-    code, out, = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, ["--no-service"]) }
+    code, out, = capture { Yamine::CLI::SystemCommand.setup(@ctx, ["--no-service"]) }
     assert_equal 0, code
     assert_includes out, "1/4 Trusting local CA"
     assert_includes out, "2/4 Starting proxy sudo daemon on port 443"
@@ -144,9 +144,9 @@ class SetupCommandTest < Minitest::Test
   end
 
   def test_root_service_failure_aborts_with_fallback
-    Ask::Local::CLI::SystemCommand.stubs(:ensure_root_service).returns(false)
+    Yamine::CLI::SystemCommand.stubs(:ensure_root_service).returns(false)
 
-    code, _out, err = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
+    code, _out, err = capture { Yamine::CLI::SystemCommand.setup(@ctx, []) }
     assert_equal 1, code
     assert_includes err, "Setup failed"
     assert_includes err, "Could not install the proxy service"
@@ -154,22 +154,22 @@ class SetupCommandTest < Minitest::Test
   end
 
   def test_trust_failure_aborts_with_manual_fix
-    Ask::Local::Trust.stubs(:trust).returns({ trusted: false, error: "nope" })
+    Yamine::Trust.stubs(:trust).returns({ trusted: false, error: "nope" })
 
-    code, _out, err = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, ["--no-service"]) }
+    code, _out, err = capture { Yamine::CLI::SystemCommand.setup(@ctx, ["--no-service"]) }
     assert_equal 1, code
     assert_includes err, "Setup failed: CA trust failed: nope"
-    assert_includes err, "ask-local trust"
-    assert_includes err, "ask-local setup"
+    assert_includes err, "yamine trust"
+    assert_includes err, "yamine setup"
   end
 
   def test_doctor_failure_aborts_with_count
-    Ask::Local::CLI::SystemCommand.stubs(:ensure_root_service).returns(true)
-    Ask::Local::Hosts.stubs(:sync).returns(true)
-    Ask::Local::Doctor.stubs(:run).returns([])
-    Ask::Local::Doctor.stubs(:print).returns(2)
+    Yamine::CLI::SystemCommand.stubs(:ensure_root_service).returns(true)
+    Yamine::Hosts.stubs(:sync).returns(true)
+    Yamine::Doctor.stubs(:run).returns([])
+    Yamine::Doctor.stubs(:print).returns(2)
 
-    code, _out, err = capture { Ask::Local::CLI::SystemCommand.setup(@ctx, []) }
+    code, _out, err = capture { Yamine::CLI::SystemCommand.setup(@ctx, []) }
     assert_equal 1, code
     assert_includes err, "2 failing check(s)"
   end
@@ -178,13 +178,13 @@ end
 class EnsureProxyHardErrorTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
-    @orig = ENV["ASK_LOCAL_STATE_DIR"]
-    ENV["ASK_LOCAL_STATE_DIR"] = @dir
-    @ctx = Ask::Local::CLI::Context.new
+    @orig = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = @dir
+    @ctx = Yamine::CLI::Context.new
   end
 
   def teardown
-    ENV["ASK_LOCAL_STATE_DIR"] = @orig
+    ENV["YAMINE_STATE_DIR"] = @orig
     FileUtils.remove_entry(@dir)
   end
 
@@ -214,17 +214,17 @@ class EnsureProxyHardErrorTest < Minitest::Test
   # Non-interactive + privileged port + nothing listening: hard error
   # pointing at setup. No silent :1355 fallback, ever.
   def test_noninteractive_privileged_is_hard_error
-    with_env("CI" => "1", "ASK_LOCAL_PORT" => nil) do
+    with_env("CI" => "1", "YAMINE_PORT" => nil) do
       $stdin.stubs(:tty?).returns(false)
       # Deterministic regardless of the real machine: after a successful
       # setup this box runs our own proxy on 443, which would otherwise
       # short-circuit ensure_proxy! instead of hitting the hard error.
-      Ask::Local::ProxyControl.stubs(:listening?).returns(false)
+      Yamine::ProxyControl.stubs(:listening?).returns(false)
       code, err = capture_err do
-        Ask::Local::CLI::BootCommand.ensure_proxy!(@ctx)
+        Yamine::CLI::BootCommand.ensure_proxy!(@ctx)
       end
       assert_equal 1, code
-      assert_includes err, "ask-local setup"
+      assert_includes err, "yamine setup"
       refute_includes err, "1355"
     end
   end
@@ -233,9 +233,9 @@ class EnsureProxyHardErrorTest < Minitest::Test
   def test_foreign_process_on_port_is_hard_error
     squatter = TCPServer.new("127.0.0.1", 0)
     port = squatter.addr[1]
-    with_env("ASK_LOCAL_PORT" => port.to_s) do
+    with_env("YAMINE_PORT" => port.to_s) do
       code, err = capture_err do
-        Ask::Local::CLI::BootCommand.ensure_proxy!(@ctx)
+        Yamine::CLI::BootCommand.ensure_proxy!(@ctx)
       end
       assert_equal 1, code
       assert_includes err, "in use by another process"
@@ -266,7 +266,7 @@ class EnsureProxyHardErrorTest < Minitest::Test
       end
     end
     t = Time.now
-    refute Ask::Local::ProxyControl.ours?(port, tls: true)
+    refute Yamine::ProxyControl.ours?(port, tls: true)
     assert Time.now - t < 4, "responding foreign server must classify fast"
   ensure
     accept&.kill
@@ -275,26 +275,26 @@ class EnsureProxyHardErrorTest < Minitest::Test
 
   # Daemon spawn failure surfaces the fix, not a fallback port.
   def test_spawn_failure_points_at_setup
-    with_env("ASK_LOCAL_PORT" => nil) do
-      Ask::Local::ProxyControl.stubs(:listening?).returns(false)
-      Ask::Local::ProxyControl.stubs(:root?).returns(false)
+    with_env("YAMINE_PORT" => nil) do
+      Yamine::ProxyControl.stubs(:listening?).returns(false)
+      Yamine::ProxyControl.stubs(:root?).returns(false)
       @ctx.stubs(:interactive?).returns(true)
-      Ask::Local::ProxyControl.stubs(:spawn_daemon)
-        .raises(Ask::Local::ProxyNotRunningError.new("Proxy did not start on port 443."))
+      Yamine::ProxyControl.stubs(:spawn_daemon)
+        .raises(Yamine::ProxyNotRunningError.new("Proxy did not start on port 443."))
       code, err = capture_err do
-        Ask::Local::CLI::BootCommand.ensure_proxy!(@ctx)
+        Yamine::CLI::BootCommand.ensure_proxy!(@ctx)
       end
       assert_equal 1, code
-      assert_includes err, "ask-local setup"
+      assert_includes err, "yamine setup"
       refute_includes err, "1355"
     end
   end
 
   # Explicit opt-in honesty: a custom port flows into the URL verbatim.
   def test_explicit_port_is_honest_in_url
-    url = Ask::Local::Hostname.url("myapp.localhost", port: 1355, tls: true)
+    url = Yamine::Hostname.url("myapp.localhost", port: 1355, tls: true)
     assert_equal "https://myapp.localhost:1355", url
-    clean = Ask::Local::Hostname.url("myapp.localhost", port: 443, tls: true)
+    clean = Yamine::Hostname.url("myapp.localhost", port: 443, tls: true)
     assert_equal "https://myapp.localhost", clean
   end
 end
