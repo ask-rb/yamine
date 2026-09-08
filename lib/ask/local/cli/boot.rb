@@ -223,7 +223,10 @@ module Ask
           privileged = port < 1024 && !ProxyControl.root?
           if privileged && !ctx.interactive?
             $stderr.puts "Error: proxy is not running and port #{port} needs root."
-            $stderr.puts "  Run this once: ask-local setup"
+            $stderr.puts "  Human: run this once — ask-local setup"
+            $stderr.puts "  Agent/CI: pre-provision passwordless sudo once —"
+            $stderr.puts "    ask-local sudoers > /tmp/ask-local.sudoers"
+            $stderr.puts "    sudo install -o root -g wheel -m 440 /tmp/ask-local.sudoers /etc/sudoers.d/ask-local"
             $stderr.puts "  Or start the proxy by hand: sudo ask-local proxy start"
             exit 1
           end

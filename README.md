@@ -28,6 +28,38 @@ The only port-suffixed URLs are the ones you explicitly ask for:
 `ask-local proxy start -p 1355` (CI/sandboxes where 443 is impossible).
 There the suffix is honest, and `ASK_LOCAL_URL` carries it faithfully.
 
+## Port 443: one-time setup, then never again
+
+Binding 443 is privileged, so ask-local installs a **root-owned launchd
+service** (macOS) or systemd unit (Linux) that binds 443 at boot — the
+same model as puma-dev and portless. Installing it needs sudo **once per
+machine**; after that, every `ask-local` run in any project gets a clean
+`https://<app>.localhost` with no elevation and no prompt.
+
+**Human (interactive):** run setup once — it trusts the CA, installs the
+service, syncs hosts, and verifies:
+
+```bash
+ask-local setup
+```
+
+**Agent / CI (no TTY):** the same commands fail fast with guidance,
+because sudo needs a terminal. To pre-provision a machine or image so
+agents can install the service without a prompt, install the scoped
+passwordless-sudo rules once (as an admin):
+
+```bash
+ask-local sudoers > /tmp/ask-local.sudoers
+sudo install -o root -g wheel -m 440 /tmp/ask-local.sudoers /etc/sudoers.d/ask-local   # macOS
+sudo install -o root -g root -m 440 /tmp/ask-local.sudoers /etc/sudoers.d/ask-local   # Linux
+```
+
+`ask-local sudoers` prints rules scoped to ask-local's own service
+re-exec — the gem's exact ruby + bin path with the `service install
+--internal` / `service uninstall --internal` subcommands — never a bare
+interpreter. Re-run it after upgrading the gem if the install path
+changes. To undo: `sudo rm /etc/sudoers.d/ask-local`.
+
 ## The one-file model
 
 Every app declares `config/local.yml` (Kamal-style) — the single source

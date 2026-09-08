@@ -143,6 +143,28 @@ module Ask
           end
         end
 
+        # Print the scoped passwordless-sudo rules that let `service install`
+        # (and only it) run without a prompt. The service re-execs the whole
+        # gem under sudo, so the safe NOPASSWD grants exactly the gem path +
+        # subcommand for the current user — never a bare interpreter. This is
+        # how agents and repeat machines get clean :443 without a TTY.
+        #
+        #   macOS: sudo install -o root -g wheel -m 440 <(ask-local sudoers) /etc/sudoers.d/ask-local
+        #   Linux: sudo install -o root -g root -m 440 <(ask-local sudoers) /etc/sudoers.d/ask-local
+        def sudoers(_ctx, _args)
+          require "etc"
+          ruby = RbConfig.ruby
+          bin = ProxyControl.bin_path
+          user = ENV.fetch("USER", Etc.getlogin)
+          puts <<~SUDOERS
+            # ask-local: let #{user} install/run the privileged proxy on port 443
+            # without a password prompt. Scoped to ask-local's own service
+            # re-exec — the gem path above, not a bare interpreter.
+            #{user} ALL=(root) NOPASSWD: #{ruby} #{bin} service install --internal
+            #{user} ALL=(root) NOPASSWD: #{ruby} #{bin} service uninstall --internal
+          SUDOERS
+        end
+
         # Root-owned LaunchDaemon binding 80/443 at boot (puma-dev model).
         # Re-execs under sudo; the proxy runs with the invoking user's state
         # dir so routes registered by unprivileged CLIs are shared
@@ -207,10 +229,27 @@ module Ask
           File.write(path, plist)
           File.chmod(0o644, path)
           Ownership.chown_service_files(path)
-          system("launchctl", "unload", path) rescue nil
-          system("launchctl", "load", path) or raise Error, "launchctl load failed"
+          launchctl_bootstrap(path)
           puts "Installed root LaunchDaemon on port 443 (state: #{state_dir})."
-          puts "Restart your machine or run: sudo launchctl load #{path}"
+        end
+
+        # Modern launchctl system-domain verbs. The legacy `launchctl load`
+        # is rejected by current macOS with error 5 (Input/output error) —
+        # and worse, it can print that error while still exiting 0, so the
+        # old code "succeeded" without the service actually running.
+        # bootstrap/bootout are the supported verbs (same as puma-dev and
+        # portless); extracted so the command sequence is unit-testable.
+        def launchctl_bootstrap(path)
+          system("launchctl", "bootout", "system", path) # best-effort: not loaded yet is fine
+          unless system("launchctl", "bootstrap", "system", path)
+            raise Error, "launchctl bootstrap failed — check the plist at #{path}"
+          end
+          system("launchctl", "enable", "system/dev.ask.local")
+          system("launchctl", "kickstart", "-k", "system/dev.ask.local")
+        end
+
+        def launchctl_bootout(path)
+          system("launchctl", "bootout", "system", path)
         end
 
         def print_linux_unit
@@ -244,7 +283,7 @@ module Ask
           case RUBY_PLATFORM
           when /darwin/
             path = "/Library/LaunchDaemons/dev.ask.local.plist"
-            system("launchctl", "unload", path) rescue nil
+            launchctl_bootout(path)
             FileUtils.rm_f(path)
             puts "Removed root LaunchDaemon."
           else
@@ -405,6 +444,18 @@ module Ask
           exit 1
         end
 
+        # The two ways to get a privileged proxy on 443: a human runs setup
+        # once (interactive sudo), or an agent/CI image is pre-provisioned
+        # with the scoped NOPASSWD rules from `ask-local sudoers`.
+        def privileged_port_hint
+          [
+            "Human: run this once — ask-local setup",
+            "Agent/CI: pre-provision passwordless sudo once —",
+            "  ask-local sudoers > /tmp/ask-local.sudoers",
+            "  sudo install -o root -g wheel -m 440 /tmp/ask-local.sudoers /etc/sudoers.d/ask-local"
+          ]
+        end
+
         # Install the root service (boot-persistent). Returns true when a
         # proxy is up on 443 afterwards, false otherwise. Never falls back
         # to a high port silently: a :port suffix in URLs would corrupt the
@@ -422,6 +473,9 @@ module Ask
           port, tls = 443, true
           unless ctx.interactive?
             warn "    no TTY available for the sudo prompt."
+            warn "    Agent/CI: pre-provision passwordless sudo once —"
+            warn "      ask-local sudoers > /tmp/ask-local.sudoers"
+            warn "      sudo install -o root -g wheel -m 440 /tmp/ask-local.sudoers /etc/sudoers.d/ask-local"
             return false
           end
           ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: true)
@@ -501,8 +555,7 @@ module Ask
           tls = true
           unless Ask::Local::ProxyControl.listening?(port) && ProxyControl.ours?(port, tls: tls)
             if port < 1024 && !Ask::Local::ProxyControl.root? && !ctx.interactive?
-              abort_setup("Proxy is not running and port 443 needs root to bind.",
-                "Run this once in a terminal: ask-local setup")
+              abort_setup("Proxy is not running and port 443 needs root to bind.", *privileged_port_hint)
             end
             ok =
               if ProxyControl.root?
@@ -519,9 +572,7 @@ module Ask
                 false
               end
             unless ok
-              abort_setup("Proxy is not running and could not be started on port 443.",
-                "Run `ask-local setup` in a terminal (it handles trust + service + hosts),",
-                "then re-run `ask-local start`.")
+              abort_setup("Proxy is not running and could not be started on port 443.", *privileged_port_hint)
             end
           end
 

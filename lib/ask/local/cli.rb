@@ -11,7 +11,7 @@ module Ask
     # In non-interactive environments (no TTY or CI=1) we fail early with
     # a clear message instead of prompting (portless lesson).
     class CLI
-      SUBCOMMANDS = %w[run get alias hosts list doctor trust clean prune proxy service kamal stop restart log status open setup start init].freeze
+      SUBCOMMANDS = %w[run get alias hosts list doctor trust clean prune proxy service sudoers kamal stop restart log status open setup start init].freeze
 
       def self.run(argv)
         new.run(argv)
@@ -44,6 +44,7 @@ module Ask
         when "prune" then RoutesCommand.prune(ctx, args)
         when "proxy" then SystemCommand.proxy(ctx, args)
         when "service" then SystemCommand.service(ctx, args)
+        when "sudoers" then SystemCommand.sudoers(ctx, args)
         when "setup" then SystemCommand.setup(ctx, args)
         when "init" then SystemCommand.init(ctx, args)
         when "start" then SystemCommand.start(ctx, args)
@@ -83,6 +84,7 @@ module Ask
             ask-local prune                  Remove stale routes
             ask-local proxy start|stop       Control the proxy
             ask-local service install|status|uninstall   OS startup service
+            ask-local sudoers                Print scoped passwordless-sudo rules for port 443
             ask-local hosts sync|clean       Manage /etc/hosts entries
             ask-local kamal <variant>        Preview-deploy snippet for Kamal
             ask-local stop                   Stop this app's backend + routes
