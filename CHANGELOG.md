@@ -1,69 +1,77 @@
 # Changelog
 
-## [0.1.1] — 2026-09-06
+## [0.2.1] — 2026-09-08
 
-Patch release focused on workstation setup, URL correctness, and proxy reliability.
-
-### Added — `ask-local setup` & `ask-local start`
-
-- `ask-local setup` — one-shot workstation setup for clean
-  `https://<app>.localhost` URLs: trust the local CA, serve port 443
-  (root launchd/systemd service when possible, sudo daemon otherwise),
-  sync `/etc/hosts`, and verify with `doctor`. Each step reports
-  `==>` / `ok` and the first failure aborts with the specific fix.
-- `ask-local start` — one-setup-and-go entry point: an idempotent
-  workstation-check-then-boot (`ask-local setup` if needed, then the
-  app). `ask-local` bare is an alias for it; `ask-local setup` stays for
-  explicit re-setup.
-- `askl` — shell-friendly alias binary (`bin/askl`, same entry point as
-  `bin/ask-local`). Keep `ask-local` in logs and docs so `grep` stays
-  useful.
-
-### Added — DNS-rebinding & log hygiene
-
-- DNS-rebinding boundary: foreign `Host` headers get a bare 404 naming
-  nothing; only hosts under our own configured TLDs see the route-listing
-  404. The proxy takes `--tld` (persisted to `proxy.tlds`) so the boundary
-  follows custom domains. The `X-Ask-Local: 1` health header marks our
-  proxy responses (including 404s) for the `ours?` probe.
-- Log rotation — `proxy.log` and per-app backend logs rotate at 5MB
-  (`ASK_LOCAL_LOG_MAX_BYTES`, one generation) before each write. A new
-  `doctor` disk-usage check warns past 100MB of state.
+Patch release focused on making `ask-local setup` dependable end-to-end:
+it now installs the 443 service and *finishes* (hosts + doctor), works
+passwordless for agents, survives first-run edge cases, and shows what it
+is doing while it works.
 
 ### Fixed
 
-- **Silent `:1355` URL fallback removed.** Privileged-port (443) bind
-  failure is now a hard error pointing at `ask-local setup`, never a
-  booted app on `https://app.localhost:1355` that silently corrupts
-  downstream consumers of `ASK_LOCAL_URL`. The only port-suffixed URLs
-  are the ones you explicitly ask for (`proxy start -p 1355`).
-- **Health probe `130+?` hang fixed.** The TLS probe's `connect` sat
-  outside the timeout: a TLS handshake against a foreign plain-HTTP
-  server blocked in `connect` for 60s+. Connect is now inside the
-  timeout, plain HTTP is tried first (our proxy answers plain HTTP via
-  byte-peeking even on the TLS port), and any HTTP response without our
-  header short-circuits as foreign — only silent servers wait for the
-  timeout.
-- `start` dispatch was missing from the dispatcher despite being in
-  `SUBCOMMANDS`, so `ask-local start` fell through to `run_named` with
-  "start" as an app name. The kamal-help append drifted to a 6-space
-  indent. Both are fixed and pinned by tests.
-- `base64` declared as a runtime dependency (it left the default gems in
-  Ruby 3.4).
-- Missing `require "optparse"` lost in the CLI split.
+- **`setup` no longer stops after installing the service.** The elevated
+  install used to `exit` mid-flow, so `/etc/hosts` was never synced and
+  `doctor` never ran despite the "setup complete" promise. Install and
+  uninstall now return booleans and the CLI owns the exit codes, so
+  `setup` always reaches the hosts and doctor steps. (`service uninstall`
+  also crashed outright — it called its handler without the required
+  context argument.)
+- **A stale user-owned plist is healed on install.** `File.write` keeps
+  an existing file's owner, so a leftover plist from an older version
+  stayed user-owned and launchd refused it forever with "Bootstrap
+  failed: 5". Install now chowns the plist to root explicitly (launchd
+  and systemd).
+- **The TLS proxy survives plaintext probes.** The health probe sends
+  plain HTTP before TLS; an unhandled `SSL_accept` error used to kill
+  the acceptor thread, and with both acceptors gone the daemon exited
+  before the readiness probe ever succeeded. A plaintext connection is
+  now just one dropped connection.
+- `clean` referenced the CA common name unqualified (NameError) — fixed.
+- `setup --no-service` printed a duplicate "2/3" step — numbered 1/4–4/4.
 
-### Tests — new coverage for this patch
+### Added
 
-- `start_test.rb` — help, fast-path vs. needs-setup branching, and the
-  non-interactive hard-error message.
-- `setup_test.rb` — four-step orchestration (all-steps-stubbed), first-failure
-  abort with fix text, `--no-service` flag, and the three `ensure_proxy!`
-  hard-error paths (non-interactive, foreign port, spawn failure) plus
-  explicit-port URL honesty and responding-foreign-server fast classification.
-- Pinned under `bundle exec rake test` (fast unit suite); no `test:e2e`
-  needed for these.
+- `ask-local sudoers` — prints the scoped NOPASSWD rules so agents and
+  CI can install and run the 443 service without a TTY. Non-interactive
+  elevation uses `sudo -n` (never prompts) and points at the grant when
+  it is missing; interactive failures just say re-run.
+- The root install syncs `/etc/hosts` under elevation, so Safari works
+  the moment setup finishes. `setup`'s hosts step verifies the block is
+  already present instead of failing unprivileged on re-runs, and
+  `ask-local hosts sync` re-runs itself elevated when the direct write
+  needs root.
+- The CA is trusted into the System keychain silently while elevated
+  (all users, no GUI popup); unprivileged trust keeps the login
+  keychain.
+- Progress UX: the root half of the install prints stage lines as it
+  works, and the proxy-start wait shows a rotating spinner on a terminal
+  (dots elsewhere), resolving to a clean "proxy is up" line.
 
-## [0.2.0] — Unreleased
+### Changed
+
+- launchctl uses the modern system-domain verbs
+  (`bootstrap`/`bootout`/`enable`/`kickstart` — the puma-dev/portless
+  pattern); the legacy `load`/`unload` are rejected by current macOS.
+  The best-effort pre-install bootout is silenced — its "Boot-out
+  failed: 5" noise on a first install looked like a failure.
+- Every privileged execution path (sudo re-exec, launchctl, systemctl,
+  `security`) flows through one injectable `Command` seam, so the test
+  suite never shells out to real privileged commands.
+
+### Tests
+
+- Hermetic and CI-safe suite: no real sudo/security/launchctl in tests;
+  exact-argument expectations on the `Command` seam, source-pinned
+  regressions for the launchctl verbs, root-owned plist and stage
+  progress.
+- New coverage: setup runs the real elevation path to "Setup complete"
+  (regression for the mid-flow exit), hosts-step write/verify/skip
+  behavior, `Hosts.synced?`, terminal spinner vs. off-tty dots, e2e
+  proof that a TLS daemon survives the plaintext probe, and both
+  elevation-failure hint paths. 182 unit + 23 e2e, all green.
+
+
+## [0.2.0] — 2026-09-07
 
 ### Changed
 
@@ -128,6 +136,71 @@ Patch release focused on workstation setup, URL correctness, and proxy reliabili
 - Install generator `source_root` pointed at a doubled path; generator
   file checks now resolve against `destination_root`.
 - Port-flag injection no longer double-sets an explicit `$PORT`.
+
+
+## [0.1.1] — 2026-09-06
+
+Patch release focused on workstation setup, URL correctness, and proxy reliability.
+
+### Added — `ask-local setup` & `ask-local start`
+
+- `ask-local setup` — one-shot workstation setup for clean
+  `https://<app>.localhost` URLs: trust the local CA, serve port 443
+  (root launchd/systemd service when possible, sudo daemon otherwise),
+  sync `/etc/hosts`, and verify with `doctor`. Each step reports
+  `==>` / `ok` and the first failure aborts with the specific fix.
+- `ask-local start` — one-setup-and-go entry point: an idempotent
+  workstation-check-then-boot (`ask-local setup` if needed, then the
+  app). `ask-local` bare is an alias for it; `ask-local setup` stays for
+  explicit re-setup.
+- `askl` — shell-friendly alias binary (`bin/askl`, same entry point as
+  `bin/ask-local`). Keep `ask-local` in logs and docs so `grep` stays
+  useful.
+
+### Added — DNS-rebinding & log hygiene
+
+- DNS-rebinding boundary: foreign `Host` headers get a bare 404 naming
+  nothing; only hosts under our own configured TLDs see the route-listing
+  404. The proxy takes `--tld` (persisted to `proxy.tlds`) so the boundary
+  follows custom domains. The `X-Ask-Local: 1` health header marks our
+  proxy responses (including 404s) for the `ours?` probe.
+- Log rotation — `proxy.log` and per-app backend logs rotate at 5MB
+  (`ASK_LOCAL_LOG_MAX_BYTES`, one generation) before each write. A new
+  `doctor` disk-usage check warns past 100MB of state.
+
+### Fixed
+
+- **Silent `:1355` URL fallback removed.** Privileged-port (443) bind
+  failure is now a hard error pointing at `ask-local setup`, never a
+  booted app on `https://app.localhost:1355` that silently corrupts
+  downstream consumers of `ASK_LOCAL_URL`. The only port-suffixed URLs
+  are the ones you explicitly ask for (`proxy start -p 1355`).
+- **Health probe `130+?` hang fixed.** The TLS probe's `connect` sat
+  outside the timeout: a TLS handshake against a foreign plain-HTTP
+  server blocked in `connect` for 60s+. Connect is now inside the
+  timeout, plain HTTP is tried first (our proxy answers plain HTTP via
+  byte-peeking even on the TLS port), and any HTTP response without our
+  header short-circuits as foreign — only silent servers wait for the
+  timeout.
+- `start` dispatch was missing from the dispatcher despite being in
+  `SUBCOMMANDS`, so `ask-local start` fell through to `run_named` with
+  "start" as an app name. The kamal-help append drifted to a 6-space
+  indent. Both are fixed and pinned by tests.
+- `base64` declared as a runtime dependency (it left the default gems in
+  Ruby 3.4).
+- Missing `require "optparse"` lost in the CLI split.
+
+### Tests — new coverage for this patch
+
+- `start_test.rb` — help, fast-path vs. needs-setup branching, and the
+  non-interactive hard-error message.
+- `setup_test.rb` — four-step orchestration (all-steps-stubbed), first-failure
+  abort with fix text, `--no-service` flag, and the three `ensure_proxy!`
+  hard-error paths (non-interactive, foreign port, spawn failure) plus
+  explicit-port URL honesty and responding-foreign-server fast classification.
+- Pinned under `bundle exec rake test` (fast unit suite); no `test:e2e`
+  needed for these.
+
 
 ## [0.1.0]
 
