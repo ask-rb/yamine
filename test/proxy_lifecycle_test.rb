@@ -87,6 +87,24 @@ class ProxyControlTest < Minitest::Test
   ensure
     squatter&.close
   end
+
+  # Regression: the TLS listener handshakes inside the acceptor thread, and
+  # the ours? health probe sends plain HTTP before TLS. An unhandled
+  # SSL_accept error ("http request") used to kill the acceptor — and with
+  # both acceptors gone the daemon exited before the readiness probe ever
+  # succeeded, so spawn_daemon raised ProxyNotRunningError. A plaintext
+  # connection must be one dropped connection, not a fatal crash.
+  def test_tls_daemon_survives_plaintext_probe
+    skip "requires spawnable ask-local binary (dev checkout)" unless File.file?(Ask::Local::ProxyControl.bin_path)
+
+    port = Ask::Local::Ports.find_free
+    pid = Ask::Local::ProxyControl.spawn_daemon(store: @store, port: port, tls: true)
+    assert Ask::Local::ProxyControl.ours?(port, tls: true),
+      "spawn_daemon's own plaintext-first readiness probe must not kill the TLS daemon"
+    assert_equal pid, Ask::Local::ProxyControl.read_pid(@store)
+  ensure
+    Process.kill("TERM", pid) if pid && Ask::Local::ProxyControl.pid_alive?(pid)
+  end
 end
 
 class ProxyKeepAliveTest < Minitest::Test

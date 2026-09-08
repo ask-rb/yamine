@@ -92,7 +92,7 @@ module Ask
                     release
                   end
                 end
-              rescue IOError, SystemCallError
+              rescue OpenSSL::SSL::SSLError, IOError, SystemCallError
                 break unless @running
               end
             end
