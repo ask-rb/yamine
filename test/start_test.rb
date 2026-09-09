@@ -34,8 +34,9 @@ class StartCommandTest < Minitest::Test
   def test_help_lists_usage_and_examples
     _code, out, = capture { Yamine::CLI::SystemCommand.start(Yamine::CLI::Context.new, ["--help"]) }
     assert_includes out, "yamine start"
-    assert_includes out, "yamine start myapp"
-    assert_includes out, "--name <name>"
+    assert_includes out, "--no-wait"
+    assert_includes out, "--variant"
+    assert_includes out, "--wait"
   end
 
   def test_fast_path_skips_setup_when_healthy

@@ -163,3 +163,102 @@ class DatabaseBootWiringTest < Minitest::Test
     assert_includes Yamine::CLI::SUBCOMMANDS, "worktree"
   end
 end
+
+class DatabaseWarningTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @state = Dir.mktmpdir
+    @orig_dir = Dir.pwd
+    @orig_env = ENV["DATABASE_URL"]
+    @orig_state = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = @state
+    Dir.chdir(@dir)
+    FileUtils.mkdir_p(File.join(@dir, "config"))
+  end
+
+  def teardown
+    Dir.chdir(@orig_dir)
+    ENV["DATABASE_URL"] = @orig_env
+    ENV["YAMINE_STATE_DIR"] = @orig_state
+    FileUtils.remove_entry(@dir) rescue nil
+    FileUtils.remove_entry(@state) rescue nil
+  end
+
+  def write_config(content)
+    File.write(File.join(@dir, "config", "local.yml"), content)
+  end
+
+  def test_no_warning_when_no_database_yml_and_no_pg_gem
+    # Pure sqlite/static app — silence is correct.
+    write_config("service: myapp\nprocesses:\n  web:\n    cmd: bin/rails s\n    proxy: true\n")
+    ENV.delete("DATABASE_URL")
+    resolved = Yamine::Resolver.resolve(@dir)
+    out, err = capture_io { Yamine::CLI::BootCommand.send(:warn_missing_template, resolved) }
+    assert_empty err
+  end
+
+  def test_warns_when_database_yml_mentions_postgres
+    write_config("service: myapp\nprocesses:\n  web:\n    cmd: bin/rails s\n    proxy: true\n")
+    File.write(File.join(@dir, "config", "database.yml"), "development:\n  adapter: postgresql\n  database: myapp_development\n")
+    ENV.delete("DATABASE_URL")
+    resolved = Yamine::Resolver.resolve(@dir)
+    _out, err = capture_io { Yamine::CLI::BootCommand.send(:warn_missing_template, resolved) }
+    assert_match(/WARNING.*database-backed/, err)
+    assert_match(/DATABASE_URL/, err)
+  end
+
+  def test_warns_when_gemfile_has_pg
+    write_config("service: myapp\nprocesses:\n  web:\n    cmd: bin/rails s\n    proxy: true\n")
+    File.write(File.join(@dir, "Gemfile"), "source \"https://rubygems.org\"\ngem \"pg\"\n")
+    ENV.delete("DATABASE_URL")
+    resolved = Yamine::Resolver.resolve(@dir)
+    _out, err = capture_io { Yamine::CLI::BootCommand.send(:warn_missing_template, resolved) }
+    assert_match(/WARNING/, err)
+  end
+
+  def test_no_warning_when_template_present_in_env_clear
+    write_config("service: myapp\nenv:\n  clear:\n    DATABASE_URL: postgres://u@/myapp_development\nprocesses:\n  web:\n    cmd: bin/rails s\n    proxy: true\n")
+    File.write(File.join(@dir, "config", "database.yml"), "development:\n  adapter: postgresql\n")
+    resolved = Yamine::Resolver.resolve(@dir)
+    assert_equal "postgres://u@/myapp_development", Yamine::CLI::BootCommand.send(:database_template_from_config, resolved)
+  end
+
+  def test_db_false_opt_out_suppresses_warning
+    write_config("service: myapp\ndb: false\nprocesses:\n  web:\n    cmd: bin/rails s\n    proxy: true\n")
+    File.write(File.join(@dir, "config", "database.yml"), "development:\n  adapter: postgresql\n")
+    ENV.delete("DATABASE_URL")
+    resolved = Yamine::Resolver.resolve(@dir)
+    assert_equal false, resolved.db
+    _out, err = capture_io { Yamine::CLI::BootCommand.send(:setup_database, Yamine::CLI::Context.new, resolved, "myapp_development") }
+    assert_empty err
+  end
+
+  def test_top_level_db_false_validates
+    File.write(File.join(@dir, "config", "local.yml"), "service: myapp\ndb: false\nprocesses:\n  web:\n    cmd: foo\n    proxy: true\n")
+    config = Yamine::Config.load(@dir)
+    assert_equal false, config.data["db"]
+  end
+
+  def test_db_true_rejected
+    File.write(File.join(@dir, "config", "local.yml"), "service: myapp\ndb: true\nprocesses:\n  web:\n    cmd: foo\n    proxy: true\n")
+    assert_raises(Yamine::ConfigError) { Yamine::Config.load(@dir) }
+  end
+
+  def test_database_exists_splits_from_ensure_exists
+    # exists? returns false without a server; ensure_exists also false — but the split means setup_database knows provenance.
+    refute Yamine::Database.exists?("nope", "postgres://127.0.0.1:1/nope")
+    refute Yamine::Database.ensure_exists("nope", "postgres://127.0.0.1:1/nope")
+  end
+
+  def test_wait_flag_parsed
+    ctx = Yamine::CLI::Context.new
+    opts = ctx.parse_flags(["--wait", "--json"], %i[wait json])
+    assert opts[:wait]
+    assert opts[:json]
+  end
+
+  def test_wait_flag_unknown_rejected
+    ctx = Yamine::CLI::Context.new
+    assert_raises(Yamine::Error) { ctx.parse_flags(["--bogus"], %i[wait json]) }
+  end
+end

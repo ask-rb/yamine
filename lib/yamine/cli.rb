@@ -94,8 +94,7 @@ module Yamine
           yamine restart                Touch tmp/restart.txt
           yamine log [-f] [n]           Tail (or follow) this app's backend log
 
-        Flags: --name, --service, --variant, --tld, --branch, --force,
-               --app-port, --proc (pick a Procfile process, e.g. --proc web)
+        Flags: --variant, --tld, --force, --app-port, --wait (default), --no-wait, --json
         Env: YAMINE_NAME/SERVICE/VARIANT/TLD/PORT/STATE_DIR, YAMINE_BRANCH=1
       HELP
     end

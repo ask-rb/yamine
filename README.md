@@ -91,6 +91,12 @@ processes:
     proxy: false
 ```
 
+Optional top-level `db: false` opts out of per-worktree databases
+(exotic setups — manual `establish_connection`, shared staging DB, …);
+`db.schema_load` overrides the schema-load command. Per-process
+`healthcheck: { path: /up, timeout: 30 }` declares what `--wait` polls
+(TCP accept when absent).
+
 `yamine init` creates the file (migrating an existing Procfile);
 Rails apps need no extra gem — yamine injects `RAILS_DEVELOPMENT_HOSTS`
 so the proxied hostname is allowed automatically. `yamine`
@@ -133,19 +139,21 @@ yamine --tld preview.example.com                # your own domain (OAuth parity)
 ## Commands
 
 ```bash
-yamine                        # infer name, boot app
+yamine                        # boot app (waits until healthy, then supervises)
+yamine start --no-wait        # fire-and-forget (register routes immediately)
+yamine start --json           # machine-readable wait result (--wait default)
 yamine run -- <cmd>           # run explicit command through proxy
-yamine <name> <cmd>           # explicit app name
 yamine get <name>             # print URL for cross-service wiring
 yamine alias <name> <port>    # static route (e.g. Docker)
 yamine list [--json]          # show active routes (+ backend liveness)
 yamine status [--json]        # show effective naming context here
 yamine doctor [--json]        # machine-readable health checks
 yamine open [name]            # open the app URL in a browser
-yamine doctor                 # read-only health check (state, proxy, routes, DNS, CA)
 yamine trust                  # add local CA to system trust store
 yamine clean                  # remove state and hosts entries
 yamine prune                  # remove stale routes
+yamine db list|create|drop    # per-worktree databases
+yamine worktree list|clean    # worktree databases + orphan cleanup
 yamine stop                   # stop this app's backend + routes
 yamine restart                # touch tmp/restart.txt (managed apps reboot)
 yamine log [-f] [n]           # tail (or follow) this app's backend log
@@ -186,11 +194,17 @@ connection (verified end-to-end: RFC 6455 handshake + frame echo).
 
 ## Machine-readable output
 
-`list`, `status`, and `doctor` accept `--json` with stable keys for
+`list`, `status`, `doctor`, and `yamine start --wait` accept `--json` with stable keys for
 agents and scripts (`DevUrl` in ask-ruby-harness consumes the same data
 in-process). Hostnames that fall outside the configured TLDs get a bare
 404 naming nothing — route names never leak to foreign hosts
 (DNS-rebinding boundary).
+
+`yamine start` (default `--wait`) exits 0 only once every HTTP route is healthy
+(healthcheck path when declared, TCP accept otherwise). On failure it
+exits 1 with the failed process, its phase, and the tail of its own log
+— no guessing, no polling, no half-booted routes. `--no-wait` keeps the
+old fire-and-forget path.
 
 ## Log rotation
 

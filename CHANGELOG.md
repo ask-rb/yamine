@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.6.0] — Unreleased
+
+`yamine start --wait` + boot readiness protocol. The remaining gap from
+“one-storey building” onwards: boot had no definitive answer — agents
+polled, guessed from logs, and raced half-booted routes. Now every phase
+(deps, db, schema, per-process health) has a real event and `--wait`
+delivers one call with a pass/fail payload. Credentials-only DB URLs
+warn loudly instead of sharing silently.
+
+### Added
+
+- `Yamine::Readiness`: phased events (`phase`, `action`, `status`,
+  `duration_ms`, `detail`), `check_deps` pre-flight, `wait_healthy`
+  (healthcheck path or TCP accept), concurrent `wait_all` (one thread
+  per process, dead-pid short-circuit so a crash fails fast), per-phase
+  timeouts (deps 30s, db 15s, schema 90s, process 45s or per-healthcheck
+  timeout). `Yamine::WaitPayload` success/failure payloads for `--json`.
+- `yamine start --wait [--json]`: spawns every process, polls until
+  healthy, registers routes only on success, kills everything (including
+  background children) and exits 1 with the failed phase + that process's
+  own log tail on failure — no half-booted routes. `--wait` is kept as a no-op alias;
+  `--no-wait` keeps the old sequential fire-and-forget path.
+  `--json` is only meaningful with wait (now default).
+- Per-process `healthcheck: { path: /up, timeout: 30 }` in
+  `config/local.yml`, respected by `--wait`. Absent means TCP accept.
+- Boot phases now visible: deps pre-flight, db (`exists?`/`ensure_exists`
+  split so provenance doesn't need a second probe), schema, per-process.
+  `Runner#spawn_http`/`adopt`/`spawned?` support the concurrent path;
+  `boot_run` child output is logged so failure payloads can tail it.
+
+### Fixed
+
+- Top-level `db: false` opts out of per-worktree databases (exotic
+  setups: manual `establish_connection`, shared staging DB, …). Validated
+  as boolean-or-mapping; `x-` extensions still ignored. `db.schema_load`
+  moves to top-level `db` (per-process ghost `db` entry was a category
+  error). Credentials-stored `DATABASE_URL`s now work when the template is
+  declared in `env.clear` (password via `local.secrets`); when no template
+  exists but the app looks database-backed (`database.yml` adapter or
+  `pg`/`mysql2`/`trilogy` in `Gemfile`) boot warns loudly with the fix
+  instead of silently sharing one database. Framework-agnostic: injection
+  is still `DATABASE_URL`, no `ask-auth` dep, no Rails load at boot.
+
 ## [0.5.0] — Unreleased
 
 Per-worktree databases: every worktree directory gets its own database

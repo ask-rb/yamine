@@ -657,18 +657,28 @@ module Yamine
       def start(ctx, args)
         if args.include?("--help") || args.include?("-h")
           puts <<~HELP
-            Usage: yamine start [name] [cmd...] [options]
+            Usage: yamine start [options]
 
             One-setup-and-go: if the workstation isn't ready (CA, proxy,
             hosts), runs the minimal needed setup first, then boots the
             app in the current directory.
 
-              yamine start              # infer name, boot -> https://<app>.localhost
-              yamine start myapp       # explicit name
+              yamine start              # block until every route is healthy, then supervise
+              yamine start --no-wait   # fire-and-forget (register routes immediately)
+              yamine start --json       # machine-readable result payload (--wait only)
               yamine start -- --help   # pass --help to the app, not here
 
             Options are passed through to the boot path:
-              --name <name> --service <svc> --variant <v> --tld <tld> --branch
+              --variant <v> --tld <tld> --force --app-port <port>
+              --wait (alias, default) --no-wait --json
+
+            Default waits: every process is spawned concurrently, each
+            healthcheck (or TCP accept when none is declared) is polled,
+            routes are registered only when all are healthy, and `ready:`
+            is printed with exit 0. On failure everything spawned is
+            killed, the failed process + its log tail is printed, and
+            the CLI exits 1 — no half-booted routes. `--no-wait` keeps
+            the old fire-and-forget path.
 
             Setup failures become hard errors pointing at `yamine setup`;
             non-interactive CI without a running proxy exits immediately.

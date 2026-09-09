@@ -136,6 +136,16 @@ module Yamine
       nil
     end
 
+    # True when the named database already exists. False covers both
+    # missing and unreachable server — ensure_exists decides creation.
+    def exists?(name, database_url)
+      case adapter_for(database_url)
+      when :postgres then pg_exists?(name, database_url)
+      when :mysql then mysql_exists?(name, database_url)
+      else false
+      end
+    end
+
     # Create the database if missing. Uses createdb/mysqladmin when
     # available; returns true/false, never raises (boot reports, not dies).
     def ensure_exists(name, database_url)
@@ -149,13 +159,7 @@ module Yamine
     def ensure_postgres(name, database_url)
       uri = URI.parse(database_url)
       env = pg_env(uri)
-      _out, status = Open3.capture2(env, "psql", "-lqt")
-      return false unless status.success?
-
-      exists = Open3.capture2(env, "psql", "-lqt")[0].split("\n").any? do |line|
-        line.split("|").first.to_s.strip == name
-      end
-      return true if exists
+      return true if pg_exists?(name, database_url)
 
       _out, status = Open3.capture2(env, "createdb", name)
       status.success?
@@ -163,22 +167,41 @@ module Yamine
       false
     end
 
-    def ensure_mysql(name, database_url)
+    def pg_exists?(name, database_url)
       uri = URI.parse(database_url)
-      args = ["-h", uri.host || "127.0.0.1", "-P", (uri.port || 3306).to_s,
-              "-u", URI.decode_www_form_component(uri.user || "root")]
-      args += ["-p#{URI.decode_www_form_component(uri.password)}"] if uri.password
-      _out, status = Open3.capture2("mysqladmin", *args, "create", name)
-      status.success? || already_exists_mysql(args, name)
+      out, status = Open3.capture2(pg_env(uri), "psql", "-lqt")
+      return false unless status.success?
+
+      out.split("\n").any? do |line|
+        line.split("|").first.to_s.strip == name
+      end
     rescue SystemCallError
       false
     end
 
-    def already_exists_mysql(args, name)
+    def mysql_exists?(name, database_url)
+      uri = URI.parse(database_url)
+      args = mysql_args(uri)
       out, status = Open3.capture2("mysql", *args, "-e", "SHOW DATABASES;")
       status.success? && out.split("\n").include?(name)
     rescue SystemCallError
       false
+    end
+
+    def ensure_mysql(name, database_url)
+      uri = URI.parse(database_url)
+      args = mysql_args(uri)
+      _out, status = Open3.capture2("mysqladmin", *args, "create", name)
+      status.success? || mysql_exists?(name, database_url)
+    rescue SystemCallError
+      false
+    end
+
+    def mysql_args(uri)
+      args = ["-h", uri.host || "127.0.0.1", "-P", (uri.port || 3306).to_s,
+              "-u", URI.decode_www_form_component(uri.user || "root")]
+      args += ["-p#{URI.decode_www_form_component(uri.password)}"] if uri.password
+      args
     end
 
     def pg_env(uri)

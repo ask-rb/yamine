@@ -81,7 +81,7 @@ module Yamine
           elsif arg.start_with?("--")
             key = arg.sub(/\A--/, "").tr("-", "_").to_sym
             if known.include?(key)
-              if %i[branch force].include?(key)
+              if %i[branch force wait no_wait json].include?(key)
                 opts[key] = true
                 i += 1
               else

@@ -53,6 +53,10 @@ module Yamine
         "tld" => "localhost",
         "host" => "myapp.local.example.com"
       },
+      # db: false opts out of per-worktree databases entirely (exotic
+      # setups: manual establish_connection, shared staging DB, ...).
+      # Absent means enabled. A mapping holds future db options.
+      "db" => false,
       "processes" => {
         "web" => {
           "cmd" => "bin/rails server -p $PORT",
@@ -238,6 +242,9 @@ module Yamine
       if data["proxy"]
         validate_proxy(data["proxy"], "#{@path} proxy")
       end
+      if data.key?("db")
+        validate_db(data["db"], "#{@path} db")
+      end
       if data["processes"]
         validate_processes(data["processes"], "#{@path} processes")
       end
@@ -267,6 +274,11 @@ module Yamine
       if value["tld"] && !Sanitize.valid_tld?(value["tld"].downcase)
         raise ConfigError, "#{context}: invalid tld #{value["tld"].inspect}"
       end
+    end
+
+    def validate_db(value, context)
+      return if value == false
+      raise ConfigError, "#{context} must be false or a mapping" unless value.is_a?(Hash)
     end
 
     def validate_processes(value, context)

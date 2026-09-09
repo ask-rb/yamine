@@ -33,11 +33,13 @@ no extra gem — the proxied hostname is allowed automatically via
 `RAILS_DEVELOPMENT_HOSTS`.
 
 ```bash
-yamine start          # setup if needed, then boot every process
-yamine                # same as start
-yamine stop           # stop this app's backend + routes
-yamine status         # show service, processes, and URLs
-yamine log [-f]       # tail the web process log
+yamine start              # setup if needed, then boot every process (waits until healthy)
+yamine start --no-wait   # fire-and-forget (register routes immediately)
+yamine start --json       # machine-readable wait result (--wait default)
+yamine                    # same as start
+yamine stop               # stop this app's backend + routes
+yamine status             # show service, processes, and URLs
+yamine log [-f]           # tail the web process log
 ```
 
 `$PORT` and `YAMINE_URL` are injected per process; HTTP processes get
@@ -96,6 +98,7 @@ proxy:
 yamine doctor                 # read-only: proxy, routes, DNS, CA trust
 yamine list --json            # routes as stable JSON
 yamine prune                  # clear stale routes from crashed sessions
+yamine start --json           # boot readiness payload (pass/fail + log tail)
 ```
 
 If a hostname does not resolve: `yamine hosts sync`. If the browser

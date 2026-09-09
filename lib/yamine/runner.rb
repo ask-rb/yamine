@@ -91,20 +91,57 @@ module Yamine
 
     # Run an arbitrary command with PORT + YAMINE_URL. Returns App.
     # register: false spawns without a route (background processes).
+    # Child output goes to log/yamine-<name>.log so `--wait` failure
+    # payloads can tail it (same file the managed path uses).
     def boot_run(name:, hostname:, url:, dir:, command:, port: nil, force: false,
-      rails_dev_host: nil, register: true, database_url: nil)
+      rails_dev_host: nil, register: true, database_url: nil, spec: nil)
       port ||= Ports.find_free
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
         database_url: database_url)
-      pid = with_clean_env { spawn(env, *command, chdir: dir) }
+      path = log_path(dir, name)
+      pid = with_clean_env { spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
       Process.detach(pid)
       target = "127.0.0.1:#{port}"
       if register
-        @store.add_route(hostname, target, Process.pid, kind: "tcp", force: force)
+        spec ||= { "dir" => File.expand_path(dir), "proc" => name }
+        @store.add_route(hostname, target, Process.pid, kind: "tcp",
+          force: force, spec: spec)
         write_backend_pid(hostname, pid)
       end
       App.new(name: name, hostname: hostname, url: url, pid: pid,
         target: target, kind: "tcp", command: command)
+    end
+
+    # Spawn without registering or waiting: the --wait path spins the
+    # whole tree up concurrently, then polls every route until healthy.
+    # Returns the placeholder App (target known before bind). Fate of
+    # the backend is decided by wait, not by spawn.
+    def spawn_http(name:, hostname:, url:, dir:, command:, port:, rails_dev_host: nil,
+      database_url: nil, force: false)
+      env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
+        database_url: database_url)
+      path = log_path(dir, name)
+      pid = with_clean_env { spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
+      Process.detach(pid)
+      App.new(name: name, hostname: hostname, url: url, pid: pid,
+        target: "127.0.0.1:#{port}", kind: "tcp", command: command)
+    end
+
+    # Register an already-spawned backend: route + sidecar, together.
+    def adopt(hostname, app, force: false, spec: nil)
+      @store.add_route(hostname, app.target, Process.pid, kind: app.kind,
+        force: force, spec: spec)
+      write_backend_pid(hostname, app.pid)
+      nil
+    end
+
+    # Still running? A port that accepts is not proof of life, but a
+    # reaped/dead pid is proof of death — that is all wait needs.
+    def spawned?(pid)
+      Process.kill(0, pid)
+      true
+    rescue SystemCallError
+      false
     end
 
     def child_env(dir, url:, port:, rails_dev_host: nil, database_url: nil)
@@ -217,6 +254,8 @@ module Yamine
       end
     end
 
+    # Log path for a process — public so the --wait failure payload
+    # can tail the right file for the phase that failed.
     def log_path(dir, name)
       path = File.expand_path(File.join(dir, "log", "yamine-#{name}.log"))
       FileUtils.mkdir_p(File.dirname(path))
@@ -234,6 +273,8 @@ module Yamine
       nil
     end
 
+    # Last lines of a log file for failure payloads. Public so the
+    # --wait path can attribute the right tail to the failed phase.
     def log_tail(path, lines: 10)
       return "(no log file)" unless File.file?(path)
 
@@ -241,6 +282,8 @@ module Yamine
     rescue SystemCallError
       "(unreadable log)"
     end
+
+    private
 
     def stop_pid(pid)
       Process.kill("TERM", pid)

@@ -16,7 +16,7 @@ module Yamine
       # boots every process, supervises the tree, cleans up on exit.
       def run_inferred(ctx, args)
         variant = ENV["YAMINE_VARIANT"]
-        opts = ctx.parse_flags(args, %i[variant tld force])
+        opts = ctx.parse_flags(args, %i[variant tld force app_port wait no_wait json])
         resolved = resolve!(ctx, variant: opts[:variant] || variant, tld: opts[:tld])
         # Ownership gate before any side effects: no proxy spawn, no
         # port allocation when we'd refuse anyway.
@@ -43,6 +43,7 @@ module Yamine
         tld = resolved.tld
         host = resolved.host
         processes = resolved.processes
+        events = opts[:events]
 
         if processes.empty?
           $stderr.puts "Error: no processes in config/local.yml. Add at least one."
@@ -52,6 +53,20 @@ module Yamine
         primary = Resolver.primary_proc(resolved)
         if primary.nil?
           $stderr.puts "Error: no HTTP process (proxy: true) found in config/local.yml."
+          exit 1
+        end
+
+        # Pre-flight: verify runtime deps BEFORE spawning anything.
+        # A missing bundle fails here in seconds with the fix, instead
+        # of a 60s Puma crash-loop ending in "did not boot".
+        deps = Readiness.phase(:deps, "check", out: events) do
+          ok, fix = Readiness.check_deps(Dir.pwd)
+          raise fix unless ok
+
+          "dependencies satisfied"
+        end
+        unless deps.status == "ok"
+          $stderr.puts "Error: #{deps.detail}"
           exit 1
         end
 
@@ -70,44 +85,18 @@ module Yamine
         # branches hop).
         db_name = Database.name_for(Dir.pwd, env: rails_env,
           state_dir: ctx.store.dir)
-        db_url = setup_database(ctx, resolved, db_name)
-        puts "  [db] #{db_name}" if db_url
+        db_created, db_url = setup_database(ctx, resolved, db_name, events: events)
+        puts "  [db] #{db_name}#{db_created ? " (created)" : ""}" if db_url
 
-        processes.each do |proc_name, entry|
-          hostname = Resolver.hostname_for(resolved, proc_name)
-          if entry["proxy"] == false
-            boot_background(ctx, runner, resolved, proc_name, entry, opts, children, db_url)
-            next
-          end
-          next unless hostname
+        with_wait = !opts[:no_wait]
+        spawn_plan = collect_spawns(ctx, runner, resolved, opts, db_url, children)
 
-          url = Hostname.url(hostname, port: ctx.proxy_port, tls: ctx.proxy_tls)
-          hostnames = [hostname]
-          puts "  [#{proc_name}] #{url}"
-
-          # Each process cmd runs through the shell so $PORT (and other
-          # env refs) expand — same trust boundary as a Procfile line
-          # (repo code, not user input). Compound lines are refused.
-          cmd = entry["cmd"].to_s
-          if cmd.match?(Yamine::Procfile::COMPOUND)
-            $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — run explicitly: yamine run -- #{cmd}"
-            next
-          end
-
-          port = opts[:app_port] || Ports.find_free
-          shell_cmd = ["sh", "-c", cmd]
-          # Always allow the proxied hostname in Rails dev (Rails ignores
-          # this env var when not a Rails app — safe for every framework).
-          # DATABASE_URL points at this worktree's own database; non-Ruby
-          # frameworks that honor it get isolation for free, others ignore it.
-          app = runner.boot_run(name: proc_name, hostname: hostname, url: url,
-            dir: Dir.pwd, command: shell_cmd, port: port, force: opts[:force],
-            rails_dev_host: hostname, database_url: db_url)
-          register_all(ctx, hostnames, app, force: opts[:force],
-            spec: { "dir" => File.expand_path(Dir.pwd), "proc" => proc_name })
-          routes_registered << { hostnames: hostnames, app: app }
-
-          puts "  -> #{url}"
+        if with_wait
+          boot_concurrent(ctx, runner, resolved, opts, spawn_plan, children,
+            routes_registered, db_url, db_name, db_created)
+        else
+          boot_sequential(ctx, runner, resolved, opts, spawn_plan, children,
+            routes_registered, db_url, events: events)
         end
 
         background = processes.select { |_, v| v["proxy"] == false }
@@ -123,6 +112,142 @@ module Yamine
         all_hostnames = routes_registered.flat_map { |r| r[:hostnames] }
         trap_cleanup(ctx, all_hostnames, all_pids)
         supervise_tree(ctx, all_hostnames, all_pids)
+      end
+
+      # One pass over config: background processes spawn immediately
+      # (no route to wait on), HTTP processes become a spawn plan the
+      # boot mode executes. Compound-line refusal happens here so both
+      # paths share one rule.
+      def collect_spawns(ctx, runner, resolved, opts, db_url, children)
+        plan = []
+        processes = resolved.processes
+        processes.each do |proc_name, entry|
+          hostname = Resolver.hostname_for(resolved, proc_name)
+          if entry["proxy"] == false
+            boot_background(ctx, runner, resolved, proc_name, entry, opts,
+              children, db_url)
+            next
+          end
+          next unless hostname
+
+          url = Hostname.url(hostname, port: ctx.proxy_port, tls: ctx.proxy_tls)
+          cmd = entry["cmd"].to_s
+          if cmd.match?(Yamine::Procfile::COMPOUND)
+            $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — run explicitly: yamine run -- #{cmd}"
+            next
+          end
+          port = opts[:app_port] || Ports.find_free
+          plan << { name: proc_name, entry: entry, hostname: hostname,
+            hostnames: [hostname], url: url, port: port,
+            command: ["sh", "-c", cmd] }
+        end
+        plan
+      end
+
+      # Default: sequential boot, route registered per process as before.
+      def boot_sequential(ctx, runner, resolved, opts, plan, children,
+        routes_registered, db_url, events: nil)
+        plan.each do |item|
+          puts "  [#{item[:name]}] #{item[:url]}"
+          # Always allow the proxied hostname in Rails dev (Rails ignores
+          # this env var when not a Rails app — safe for every framework).
+          # DATABASE_URL points at this worktree's own database; non-Ruby
+          # frameworks that honor it get isolation for free, others ignore it.
+          # boot_run registers the route + backend sidecar itself
+          # (register: true default); no separate adopt step needed.
+          app = runner.boot_run(name: item[:name], hostname: item[:hostname],
+            url: item[:url], dir: Dir.pwd, command: item[:command],
+            port: item[:port], force: opts[:force],
+            rails_dev_host: item[:hostname], database_url: db_url)
+          routes_registered << { hostnames: item[:hostnames], app: app }
+
+          puts "  -> #{item[:url]}"
+        end
+        children
+      end
+
+      # --wait: spawn everything first, then poll every port/path until
+      # healthy. No route exists until its backend answers, so half-boots
+      # never leak into the proxy. A backend that dies before its route
+      # registers is cleaned up like any other failed process.
+      def boot_concurrent(ctx, runner, resolved, opts, plan, children,
+        routes_registered, db_url, db_name, db_created)
+        apps = {}
+        plan.each do |item|
+          puts "  [#{item[:name]}] #{item[:url]}"
+          apps[item[:name]] = {
+            item: item,
+            app: runner.spawn_http(name: item[:name], hostname: item[:hostname],
+              url: item[:url], dir: Dir.pwd, command: item[:command],
+              port: item[:port], rails_dev_host: item[:hostname],
+              database_url: db_url, force: opts[:force])
+          }
+        end
+        wait_result = Readiness.wait_all(apps, tls: ctx.proxy_tls, out: nil)
+        failed = wait_result.select { |r| r[:status] != "ok" }
+
+        if failed.empty?
+          apps.each do |name, slot|
+            runner.adopt(slot[:item][:hostname], slot[:app], force: opts[:force],
+              spec: { "dir" => File.expand_path(Dir.pwd), "proc" => name })
+            routes_registered << { hostnames: slot[:item][:hostnames], app: slot[:app] }
+            puts "  -> #{slot[:item][:url]}"
+          end
+        end
+        finish_wait(ctx, resolved, apps, wait_result, failed, routes_registered,
+          children, db_name, db_url, db_created, json: opts[:json])
+      end
+
+      # --wait epilogue: on success the summary payload (URLs + per-process
+      # health) goes to stdout and boot continues into supervision. On
+      # failure every spawned child is killed and removed, the failure
+      # payload (failed phase + log tail) prints, and start exits 1 —
+      # no half-booted routes left behind.
+      def finish_wait(ctx, resolved, apps, wait_result, failed, routes_registered,
+        children, db_name, db_url, db_created, json: false)
+        urls = apps.transform_values { |slot| slot[:item][:url] }
+        if failed.empty?
+          puts "ready: #{urls.map { |n, u| "#{n}=#{u}" }.join(" ")}"
+          payload = Yamine::WaitPayload.success(resolved, wait_result, urls: urls,
+            db_name: db_name, db_url: db_url, created: db_created) if json
+          puts JSON.generate(payload) if json
+          return
+        end
+
+        apps.each_value { |slot| stop_spawned(slot[:app]) }
+        children.each { |c| stop_spawned_pid(c[:pid]) }
+        first = failed.first
+        payload = Yamine::WaitPayload.failure(resolved, wait_result, failed: first,
+          log_tail: tail_for(failed.first, apps))
+        if json
+          puts JSON.generate(payload)
+        else
+          $stderr.puts "Error: #{first[:name]} failed (#{first[:phase]}): #{first[:detail]}"
+          $stderr.puts payload[:log_tail].to_s.lines.last(10).join if payload[:log_tail]
+          $stderr.puts "Full log: #{payload[:log_path]}" if payload[:log_path]
+        end
+        cleanup_routes(ctx, apps.values.map { |slot| slot[:item][:hostname] })
+        exit 1
+      end
+
+      def tail_for(failure, apps)
+        name = failure[:name]
+        slot = apps[name]
+        path = slot ? File.expand_path(File.join(Dir.pwd, "log", "yamine-#{name}.log")) : nil
+        lines = path && File.file?(path) ? File.readlines(path).last(20).join : "(no log file)"
+        { path: path, tail: lines }
+      rescue SystemCallError
+        { path: path, tail: "(unreadable log)" }
+      end
+
+      def stop_spawned(app)
+        stop_spawned_pid(app.pid)
+      end
+
+      def stop_spawned_pid(pid)
+        Process.kill("TERM", pid)
+      rescue SystemCallError
+        nil
       end
 
       # A background process (proxy: false) is spawned, logged, and
@@ -187,51 +312,125 @@ module Yamine
       end
 
       # Resolve this worktree's database, create it if missing, and run
-      # the app's schema-load command on first creation. Returns the
-      # DATABASE_URL for injection, or nil when there's nothing to do
-      # (no template URL, sqlite, or the app opted out via db: false).
-      def setup_database(ctx, resolved, db_name)
-        return nil if resolved.processes["db"] == false
+      # the app's schema-load command on first creation. Returns
+      # [created, url]: created is true only when this boot created the
+      # database (so --wait can report provenance without a second
+      # probe), url is nil when there is nothing to inject.
+      #
+      # Template sources: ENV DATABASE_URL, then config env.clear
+      # DATABASE_URL (top-level env, falling back to per-process env
+      # for configs written before top-level env existed). Injected
+      # DATABASE_URL overrides database.yml/credentials at connection
+      # time (ActiveRecord merges env over file config), so credentials
+      # apps work — they just need the template declared in config.
+      def setup_database(ctx, resolved, db_name, events: nil)
+        return [false, nil] if db_opted_out?(resolved)
 
         template = ENV["DATABASE_URL"] || database_template_from_config(resolved)
-        return nil if template.nil? || template.strip.empty?
+        if template.nil? || template.strip.empty?
+          warn_missing_template(resolved)
+          return [false, nil]
+        end
 
         url = Database.url_for(db_name, template)
-        return nil unless url
+        return [false, nil] unless url
 
-        if Database.ensure_exists(db_name, template)
-          puts "  [db] created #{db_name}" unless database_exists?(db_name, template)
-          run_schema_load(resolved, url)
-        else
-          $stderr.puts "  [db] WARNING: could not create #{db_name} — processes share the template database."
-          return nil
+        db_event = Readiness.phase(:db, "ensure #{db_name}", out: events) do
+          existed = Database.exists?(db_name, template)
+          raise "database server unreachable — is postgres/mysql running?" unless Database.ensure_exists(db_name, template)
+
+          existed ? "already exists" : "created #{db_name}"
         end
-        url
+        unless db_event.status == "ok"
+          $stderr.puts "  [db] WARNING: #{db_event.detail} — processes share the template database."
+          return [false, nil]
+        end
+        created = db_event.detail.to_s.start_with?("created")
+
+        schema_event = Readiness.phase(:schema, "load #{db_name}", out: events) do
+          next "skipped (already exists)" unless created
+
+          run_schema_load(resolved, url)
+        end
+        unless schema_event.status == "ok"
+          $stderr.puts "  [db] WARNING: schema load #{schema_event.status}: #{schema_event.detail}."
+        end
+        [created, url]
       end
 
-      def database_exists?(name, template)
-        # ensure_exists is idempotent; this second call is cheap (psql -lqt)
-        # and tells us whether to print "created" vs nothing.
-        Database.ensure_exists(name, template)
+      # Top-level `db: false` opts out of per-worktree databases.
+      # (A `db` process entry still boots as a process — only the
+      # explicit top-level key opts out.)
+      def db_opted_out?(resolved)
+        resolved.db == false
+      end
+
+      # The dangerous case made loud: the app looks database-backed
+      # (server adapter in database.yml, or pg/mysql2 in the Gemfile)
+      # but no template was declared, so every worktree would silently
+      # share one database. Name the fix; do not guess.
+      def warn_missing_template(resolved)
+        return unless database_backed?
+
+        $stderr.puts "  [db] WARNING: app looks database-backed but no DATABASE_URL template found."
+        $stderr.puts "    Each worktree would share one database. Declare the template in config/local.yml:"
+        $stderr.puts "      env:"
+        $stderr.puts "        clear:"
+        $stderr.puts "          DATABASE_URL: postgres://user@localhost:5432/myapp_development"
+        $stderr.puts "    (password via config/local.secrets + env.secret), or opt out with top-level `db: false`."
+      end
+
+      # Heuristics, deliberately conservative: only warn when there is
+      # positive evidence of a server database. SQLite-only and
+      # database-less apps stay silent.
+      def database_backed?
+        database_yml_server? || gemfile_server_adapter?
+      end
+
+      def database_yml_server?(path = File.join(Dir.pwd, "config", "database.yml"))
+        return false unless File.file?(path)
+
+        content = File.read(path)
+        content.match?(/adapter:\s*(postgresql|postgres|postgis|mysql2?|trilogy)/i)
+      rescue SystemCallError
+        false
+      end
+
+      def gemfile_server_adapter?(path = File.join(Dir.pwd, "Gemfile"))
+        return false unless File.file?(path)
+
+        content = File.read(path)
+        content.match?(/gem\s+["'](pg|mysql2|trilogy)["']/)
+      rescue SystemCallError
+        false
       end
 
       def database_template_from_config(resolved)
+        top = resolved.env.is_a?(Hash) ? resolved.env["clear"] : nil
+        from_top = top.is_a?(Hash) ? top["DATABASE_URL"] : nil
+        return from_top if from_top && !from_top.to_s.strip.empty?
+
         env = resolved.processes.values.map { |e| e["env"] || {} }
         clear = env.map { |e| e["clear"] || {} }.reduce({}, :merge)
         clear["DATABASE_URL"]
       end
 
       # Schema-load on first boot uses the app's own command when declared
-      # (db.schema_load in config/local.yml), else a Rails default when a
-      # Rails app is detected, else nothing (frameworks without a
-      # schema concept need no step).
+      # (top-level db.schema_load in config/local.yml), else a Rails
+      # default when a Rails app is detected, else nothing (frameworks
+      # without a schema concept need no step). Returns a detail string.
       def run_schema_load(resolved, url)
-        cmd = resolved.processes.dig("db", "schema_load") ||
+        cmd = db_schema_load(resolved) ||
           ("bin/rails db:schema:load" if rails_app?)
-        return unless cmd
+        return "no schema-load command" unless cmd
 
-        system({ "DATABASE_URL" => url, "RAILS_ENV" => rails_env },
+        ok = system({ "DATABASE_URL" => url, "RAILS_ENV" => rails_env },
           "sh", "-c", cmd, chdir: Dir.pwd, out: File::NULL, err: File::NULL)
+        ok ? "loaded schema via #{cmd}" : raise("schema-load exited non-zero: #{cmd}")
+      end
+
+      def db_schema_load(resolved)
+        resolved.db.is_a?(Hash) ? resolved.db["schema_load"] : nil
       end
 
       def rails_app?
@@ -288,21 +487,6 @@ module Yamine
             exit 0
           end
         end
-      end
-
-      def register_all(ctx, hostnames, app, force:, spec: nil)
-        hostnames[1..].each do |h|
-          ctx.store.add_route(h, app.target, Process.pid, kind: app.kind,
-            force: force, spec: spec)
-          write_backend_sidecar(ctx, h, app.pid)
-        end
-      end
-
-      def write_backend_sidecar(ctx, hostname, pid)
-        ctx.store.ensure_dir
-        File.write(File.join(ctx.store.dir, "backend-#{hostname}.pid"), "#{pid}\n")
-      rescue SystemCallError
-        nil
       end
 
       def cleanup_routes(ctx, hostnames)

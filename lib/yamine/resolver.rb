@@ -9,7 +9,7 @@ module Yamine
     module_function
 
     Result = Struct.new(:app, :tld, :host, :processes, :secrets,
-      :sources, :variant, keyword_init: true)
+      :sources, :variant, :db, :env, keyword_init: true)
 
     def resolve(dir = Dir.pwd, variant: nil, tld: nil, host: nil)
       config = Config.load(dir, variant: variant)
@@ -51,7 +51,9 @@ module Yamine
         processes: processes,
         secrets: config.secrets,
         sources: sources,
-        variant: variant_name
+        variant: variant_name,
+        db: config.data["db"],
+        env: config.env_config
       )
     end
 
