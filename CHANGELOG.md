@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.0] — Unreleased
+
+Per-worktree databases: every worktree directory gets its own database
+so concurrent agents never share tables.
+
+### Added
+
+- `Yamine::Database`: `<sanitized-dir-basename>_<env>` naming
+  (`/code/myapp-fix` → `myapp_fix_development`; main keeps the bare
+  name), 63-byte Postgres cap with hash-suffix truncation, collision
+  guard via state map (silent sharing would be the bug this kills).
+- Boot resolves the DB once, creates it (`createdb`/`mysqladmin`,
+  never raises — warns and shares template on failure), runs the app's
+  schema-load (`db.schema_load` in config, Rails default, else nothing),
+  and injects `DATABASE_URL` into every process. SQLite left alone.
+- `yamine db list|create|drop` and `yamine worktree list|clean`
+  (orphan reaping for deleted worktrees). Branch plays no part —
+  directories are stable, branches hop.
+
 ## [0.3.0] — Unreleased
 
 Renamed from `ask-local` to **`yamine`** (يمين, "right hand" — the local
