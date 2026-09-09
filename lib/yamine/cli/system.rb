@@ -763,6 +763,134 @@ module Yamine
         puts "    - #{app}-#{slug}.#{domain}"
         puts "  # Prefer Kamal multi-host for production; single-host preview above is fine for ephemeral branches."
       end
+
+      # Per-worktree databases: list/create/drop, plus orphan cleanup.
+      # `db list` shows every claimed database with its worktree dir.
+      # `db create` resolves this worktree's name and creates it.
+      # `db drop <name>` drops one database (refuses without --force
+      # when its worktree still exists).
+      def db(ctx, args)
+        sub = args.first
+        case sub
+        when "list", nil then db_list(ctx)
+        when "create" then db_create(ctx)
+        when "drop" then db_drop(ctx, args[1..] || [])
+        else raise Error, "Usage: yamine db [list|create|drop <name> [--force]]"
+        end
+      end
+
+      def db_list(ctx)
+        map = Database.load_map(ctx.store.dir)
+        if map.empty?
+          puts "No worktree databases claimed yet."
+          puts "Boot an app with a DATABASE_URL template to create one."
+          return
+        end
+        map.each do |name, info|
+          alive = File.directory?(info["dir"]) ? "" : " (worktree gone)"
+          puts "  #{name}  ->  #{info["dir"]}#{alive}"
+        end
+      end
+
+      def db_create(ctx)
+        resolved = Resolver.resolve(Dir.pwd)
+        name = Database.name_for(Dir.pwd, env: boot_env_name,
+          state_dir: ctx.store.dir)
+        template = ENV["DATABASE_URL"]
+        unless template && !template.strip.empty?
+          $stderr.puts "Error: set DATABASE_URL (template with host/user; database segment is replaced)."
+          exit 1
+        end
+        if Database.ensure_exists(name, template)
+          puts "Database #{name} ready."
+        else
+          $stderr.puts "Error: could not create #{name}. Check the database server is running."
+          exit 1
+        end
+      end
+
+      def db_drop(ctx, args)
+        force = args.delete("--force")
+        name = args.first
+        raise Error, "Usage: yamine db drop <name> [--force]" unless name
+
+        map = Database.load_map(ctx.store.dir)
+        info = map[name]
+        if info && File.directory?(info["dir"]) && !force
+          $stderr.puts "Error: worktree #{info["dir"]} still exists. Use --force to drop #{name} anyway."
+          exit 1
+        end
+        if drop_database(ctx, name)
+          map.delete(name)
+          Database.save_map(ctx.store.dir, map)
+          puts "Dropped #{name}."
+        else
+          $stderr.puts "Error: could not drop #{name}."
+          exit 1
+        end
+      end
+
+      def drop_database(_ctx, name)
+        template = ENV["DATABASE_URL"]
+        return false unless template && !template.strip.empty?
+
+        case Database.adapter_for(template)
+        when :postgres
+          uri = URI.parse(template)
+          _out, status = Open3.capture2("dropdb", name, env: Database.pg_env(uri))
+          status.success?
+        when :mysql
+          uri = URI.parse(template)
+          args = ["-h", uri.host || "127.0.0.1", "-u",
+                  URI.decode_www_form_component(uri.user || "root")]
+          _out, status = Open3.capture2("mysqladmin", *args, "drop", name, "-f")
+          status.success?
+        else
+          false
+        end
+      rescue SystemCallError
+        false
+      end
+
+      def boot_env_name
+        ENV.fetch("RAILS_ENV", "development")
+      end
+
+      # Worktree helpers: list claimed databases with liveness, clean
+      # drops databases whose worktree dirs are gone.
+      def worktree(ctx, args)
+        sub = args.first
+        case sub
+        when "list", nil
+          map = Database.load_map(ctx.store.dir)
+          if map.empty?
+            puts "No worktree databases claimed yet."
+            return
+          end
+          map.each do |name, info|
+            alive = File.directory?(info["dir"]) ? "alive" : "gone"
+            puts "  #{name}  #{info["dir"]}  (#{alive})"
+          end
+        when "clean"
+          orphaned = Database.orphaned(ctx.store.dir)
+          if orphaned.empty?
+            puts "No orphaned worktree databases."
+            return
+          end
+          orphaned.each do |name, _info|
+            if drop_database(ctx, name)
+              puts "Dropped orphaned #{name}."
+            else
+              $stderr.puts "Could not drop #{name} — remove manually."
+            end
+          end
+          map = Database.load_map(ctx.store.dir)
+          orphaned.each_key { |name| map.delete(name) }
+          Database.save_map(ctx.store.dir, map)
+        else
+          raise Error, "Usage: yamine worktree [list|clean]"
+        end
+      end
     end
   end
 end

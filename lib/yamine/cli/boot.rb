@@ -62,10 +62,21 @@ module Yamine
         puts "yamine (#{service})"
         puts "--"
 
+        # Per-worktree database: one database per directory so concurrent
+        # agents never share tables. Resolved once, injected into every
+        # process as DATABASE_URL, created on demand with the app's own
+        # schema-load command. SQLite needs nothing (relative paths
+        # already isolate); the branch plays no part (dirs are stable,
+        # branches hop).
+        db_name = Database.name_for(Dir.pwd, env: rails_env,
+          state_dir: ctx.store.dir)
+        db_url = setup_database(ctx, resolved, db_name)
+        puts "  [db] #{db_name}" if db_url
+
         processes.each do |proc_name, entry|
           hostname = Resolver.hostname_for(resolved, proc_name)
           if entry["proxy"] == false
-            boot_background(ctx, runner, resolved, proc_name, entry, opts, children)
+            boot_background(ctx, runner, resolved, proc_name, entry, opts, children, db_url)
             next
           end
           next unless hostname
@@ -87,9 +98,11 @@ module Yamine
           shell_cmd = ["sh", "-c", cmd]
           # Always allow the proxied hostname in Rails dev (Rails ignores
           # this env var when not a Rails app — safe for every framework).
+          # DATABASE_URL points at this worktree's own database; non-Ruby
+          # frameworks that honor it get isolation for free, others ignore it.
           app = runner.boot_run(name: proc_name, hostname: hostname, url: url,
             dir: Dir.pwd, command: shell_cmd, port: port, force: opts[:force],
-            rails_dev_host: hostname)
+            rails_dev_host: hostname, database_url: db_url)
           register_all(ctx, hostnames, app, force: opts[:force],
             spec: { "dir" => File.expand_path(Dir.pwd), "proc" => proc_name })
           routes_registered << { hostnames: hostnames, app: app }
@@ -114,7 +127,7 @@ module Yamine
 
       # A background process (proxy: false) is spawned, logged, and
       # supervised exactly like an HTTP one — it just gets no route.
-      def boot_background(ctx, runner, resolved, proc_name, entry, opts, children)
+      def boot_background(ctx, runner, resolved, proc_name, entry, opts, children, db_url)
         cmd = entry["cmd"].to_s
         if cmd.match?(Yamine::Procfile::COMPOUND)
           $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — run explicitly: yamine run -- #{cmd}"
@@ -124,7 +137,8 @@ module Yamine
         url = "background://#{resolved.app}/#{proc_name}"
         app = runner.boot_run(name: proc_name, hostname: "#{resolved.app}.#{proc_name}.internal",
           url: url, dir: Dir.pwd, command: ["sh", "-c", cmd], port: port,
-          force: opts[:force], rails_dev_host: nil, register: false)
+          force: opts[:force], rails_dev_host: nil, register: false,
+          database_url: db_url)
         children << { name: proc_name, pid: app.pid }
         puts "  [#{proc_name}] background (pid #{app.pid})"
       end
@@ -164,6 +178,64 @@ module Yamine
         end
         # Host env (dotenv from .env) already in ENV
         env
+      end
+
+      # Rails env for database naming: RAILS_ENV when set, else development.
+      # Non-Rails apps ignore it (their DATABASE_URL template decides).
+      def rails_env
+        ENV.fetch("RAILS_ENV", "development")
+      end
+
+      # Resolve this worktree's database, create it if missing, and run
+      # the app's schema-load command on first creation. Returns the
+      # DATABASE_URL for injection, or nil when there's nothing to do
+      # (no template URL, sqlite, or the app opted out via db: false).
+      def setup_database(ctx, resolved, db_name)
+        return nil if resolved.processes["db"] == false
+
+        template = ENV["DATABASE_URL"] || database_template_from_config(resolved)
+        return nil if template.nil? || template.strip.empty?
+
+        url = Database.url_for(db_name, template)
+        return nil unless url
+
+        if Database.ensure_exists(db_name, template)
+          puts "  [db] created #{db_name}" unless database_exists?(db_name, template)
+          run_schema_load(resolved, url)
+        else
+          $stderr.puts "  [db] WARNING: could not create #{db_name} — processes share the template database."
+          return nil
+        end
+        url
+      end
+
+      def database_exists?(name, template)
+        # ensure_exists is idempotent; this second call is cheap (psql -lqt)
+        # and tells us whether to print "created" vs nothing.
+        Database.ensure_exists(name, template)
+      end
+
+      def database_template_from_config(resolved)
+        env = resolved.processes.values.map { |e| e["env"] || {} }
+        clear = env.map { |e| e["clear"] || {} }.reduce({}, :merge)
+        clear["DATABASE_URL"]
+      end
+
+      # Schema-load on first boot uses the app's own command when declared
+      # (db.schema_load in config/local.yml), else a Rails default when a
+      # Rails app is detected, else nothing (frameworks without a
+      # schema concept need no step).
+      def run_schema_load(resolved, url)
+        cmd = resolved.processes.dig("db", "schema_load") ||
+          ("bin/rails db:schema:load" if rails_app?)
+        return unless cmd
+
+        system({ "DATABASE_URL" => url, "RAILS_ENV" => rails_env },
+          "sh", "-c", cmd, chdir: Dir.pwd, out: File::NULL, err: File::NULL)
+      end
+
+      def rails_app?
+        File.file?(File.join(Dir.pwd, "config", "application.rb"))
       end
 
       def supervise_tree(ctx, hostnames, pids)

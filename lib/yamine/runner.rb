@@ -92,9 +92,10 @@ module Yamine
     # Run an arbitrary command with PORT + YAMINE_URL. Returns App.
     # register: false spawns without a route (background processes).
     def boot_run(name:, hostname:, url:, dir:, command:, port: nil, force: false,
-      rails_dev_host: nil, register: true)
+      rails_dev_host: nil, register: true, database_url: nil)
       port ||= Ports.find_free
-      env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host)
+      env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
+        database_url: database_url)
       pid = with_clean_env { spawn(env, *command, chdir: dir) }
       Process.detach(pid)
       target = "127.0.0.1:#{port}"
@@ -106,7 +107,7 @@ module Yamine
         target: target, kind: "tcp", command: command)
     end
 
-    def child_env(dir, url:, port:, rails_dev_host: nil)
+    def child_env(dir, url:, port:, rails_dev_host: nil, database_url: nil)
       env = { "YAMINE_URL" => url }
       env["PORT"] = port.to_s if port
       env["HOST"] = "127.0.0.1"
@@ -116,6 +117,10 @@ module Yamine
       # proxied hostname so Rails apps boot behind yamine with zero
       # config — this replaces the yamine-rails hosts patch.
       env["RAILS_DEVELOPMENT_HOSTS"] = rails_dev_host if rails_dev_host
+      # Per-worktree database: every process in this worktree shares one
+      # isolated database. Frameworks that honor DATABASE_URL (Rails,
+      # Django, most Node) get isolation for free; others ignore it.
+      env["DATABASE_URL"] = database_url if database_url
       env
     end
 

@@ -10,7 +10,7 @@ module Yamine
   # In non-interactive environments (no TTY or CI=1) we fail early with
   # a clear message instead of prompting (portless lesson).
   class CLI
-    SUBCOMMANDS = %w[run get alias hosts list doctor trust clean prune proxy service sudoers kamal stop restart log status open setup start init].freeze
+    SUBCOMMANDS = %w[run get alias hosts list doctor trust clean prune proxy service sudoers kamal stop restart log status open setup start init db worktree].freeze
 
     def self.run(argv)
       new.run(argv)
@@ -47,6 +47,8 @@ module Yamine
       when "setup" then SystemCommand.setup(ctx, args)
       when "init" then SystemCommand.init(ctx, args)
       when "start" then SystemCommand.start(ctx, args)
+      when "db" then SystemCommand.db(ctx, args)
+      when "worktree" then SystemCommand.worktree(ctx, args)
       when "kamal" then SystemCommand.kamal(ctx, args)
       when "stop"
         exit RoutesCommand.stop(ctx, args)
@@ -81,6 +83,8 @@ module Yamine
           yamine trust                  Add local CA to trust store
           yamine clean                  Remove state and hosts entries
           yamine prune                  Remove stale routes
+          yamine db list|create|drop      Per-worktree databases
+          yamine worktree list|clean     Worktree databases + orphan cleanup
           yamine proxy start|stop       Control the proxy
           yamine service install|status|uninstall   OS startup service
           yamine sudoers                Print scoped passwordless-sudo rules for port 443
