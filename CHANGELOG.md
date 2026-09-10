@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.10.1] — 2026-09-10
+
+### Fixed
+
+- **The CA is regenerated before trust is judged, not after.** Both
+  trust paths asked `Certs.trusted?` first, which compares the trust
+  marker against the certificate ON DISK. A proxy regenerates the CA at
+  boot when the on-disk one is missing, expiring, or renamed — so after
+  a rename the marker still matched the OLD certificate, trust was
+  skipped as "already done", and the proxy then came up serving a CA the
+  keychain did not trust: TLS verification fails for every route. The
+  check now brings the CA up to date first (`ca_current_and_trusted?`,
+  used by both paths).
+
+
 ## [0.10.0] — 2026-09-10
 
 The ask-local rename is finished: the two user-visible names it left

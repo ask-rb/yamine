@@ -178,3 +178,89 @@ class ServiceLabelTest < Minitest::Test
     assert_includes uninstall, "remove_legacy_launchd"
   end
 end
+
+# A proxy regenerates the CA at boot (Certs#load_ca -> ensure_ca) when the
+# on-disk one is missing, expiring, or renamed, and the trust marker is a
+# fingerprint of whatever was trusted. So deciding "already trusted" from
+# the marker WITHOUT first bringing the CA up to date reads a stale match:
+# trust is skipped, the proxy then boots with a CA the keychain does not
+# know, and TLS verification fails for every route.
+class CaFreshnessOrderingTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @orig = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = @dir
+  end
+
+  def teardown
+    ENV["YAMINE_STATE_DIR"] = @orig
+    FileUtils.remove_entry(@dir) rescue nil
+  end
+
+  # The regression: a CA whose subject no longer matches CA_COMMON_NAME
+  # (the post-rename state) with a marker that matches it must NOT be
+  # reported as trusted — the CA has to be replaced first.
+  def test_stale_named_ca_is_not_reported_trusted
+    dir = Dir.mktmpdir
+    Yamine::Certs.ensure_ca(dir)
+    # Rewrite the cert under an old name but leave the marker matching it,
+    # exactly as a machine upgraded across a rename looks.
+    paths = Yamine::Certs.ca_paths(dir)
+    key = OpenSSL::PKey::EC.generate("prime256v1")
+    cert = OpenSSL::X509::Certificate.new
+    cert.version = 2
+    cert.serial = OpenSSL::BN.rand(128, 0)
+    cert.subject = cert.issuer = OpenSSL::X509::Name.parse("/CN=Ask Local CA")
+    cert.not_before = Time.now - 3600
+    cert.not_after = Time.now + 86_400
+    cert.public_key = key
+    ef = OpenSSL::X509::ExtensionFactory.new
+    ef.subject_certificate = cert
+    ef.issuer_certificate = cert
+    cert.add_extension(ef.create_extension("basicConstraints", "CA:TRUE", true))
+    cert.sign(key, "SHA256")
+    File.write(paths[:cert], cert.to_pem)
+    File.write(paths[:key], key.to_pem)
+    Yamine::Certs.mark_trusted(dir)
+
+    assert Yamine::Certs.trusted?(dir),
+      "precondition: the marker matches the stale certificate"
+
+    refute Yamine::CLI::SystemCommand.ca_current_and_trusted?(dir),
+      "a CA under the old name must be replaced and re-trusted, not skipped"
+  ensure
+    FileUtils.remove_entry(dir) if dir && File.directory?(dir)
+  end
+
+  def test_current_ca_reports_trusted_without_extra_work
+    Yamine::Certs.ensure_ca(@dir)
+    Yamine::Certs.mark_trusted(@dir)
+
+    assert Yamine::CLI::SystemCommand.ca_current_and_trusted?(@dir)
+  end
+
+  # Both trust paths must go through the fresh-CA check.
+  def test_both_trust_paths_use_the_freshness_check
+    source = File.read(File.join(__dir__, "..", "lib", "yamine", "cli", "system.rb"))
+
+    %w[ensure_workstation! ensure_system_ca_trust].each do |method|
+      body = method_body(source, method)
+
+      refute_nil body, "could not locate #{method} in system.rb"
+      assert_includes body, "ca_current_and_trusted?",
+        "#{method} must not decide trust from a possibly-stale marker"
+    end
+  end
+
+  # The method's text, from its `def` up to the next `def` at the same
+  # indentation. Simpler and sturdier than matching the closing `end`,
+  # since these methods close at varying depths.
+  def method_body(source, name)
+    start = source.index("def #{name}")
+    return nil unless start
+
+    rest = source[(start + 1)..]
+    following = rest&.match(/^      def /)
+    following ? source[start, following.begin(0) + 1] : source[start..]
+  end
+end

@@ -334,13 +334,29 @@ module Yamine
         puts "Installed root LaunchDaemon on port 443 (state: #{state_dir})."
       end
 
+      # True when the trust store covers the CA this machine should be
+      # serving with — regenerating the CA first if it is missing,
+      # expiring, or renamed.
+      #
+      # The ordering is the whole point, so it lives in one place rather
+      # than at each call site. `trusted?` compares a marker against the
+      # fingerprint of the certificate ON DISK, and a proxy regenerates
+      # the CA at boot when the name changes. Checking the marker before
+      # the CA is current therefore reads a stale match, skips trust, and
+      # lets the proxy come up serving a CA the keychain does not trust —
+      # breaking TLS for every route.
+      def ca_current_and_trusted?(dir = Certs.state_dir)
+        Certs.ensure_ca(dir)
+        Certs.trusted?(dir)
+      end
+
       # Root-only CA trust: the System keychain (all users, no prompt).
       # Safe to call repeatedly — once the marker is set it is a no-op.
       # Prints before doing work: the System keychain add can take a few
       # seconds, and this runs in the root half of setup where silence
       # reads as a hang.
       def ensure_system_ca_trust
-        return if Certs.trusted?(Certs.state_dir)
+        return if ca_current_and_trusted?(Certs.state_dir)
 
         puts "    Trusting the CA into the System keychain..."
         result = Trust.trust
@@ -760,7 +776,7 @@ module Yamine
       # those users had already chosen to avoid.
       def ensure_workstation!(ctx)
         # 1. CA
-        unless Yamine::Certs.trusted?(ctx.store.dir)
+        unless ca_current_and_trusted?(ctx.store.dir)
           result = Yamine::Trust.trust
           unless result[:trusted]
             abort_setup("CA trust failed: #{result[:error]}",
