@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.2] — 2026-09-10
+
+### Fixed
+
+- **The rest of the `--json` stdout leaks.** Two writers still reached
+  stdout during a machine-readable run, corrupting the stream a parser
+  reads: the `-> <url>` line from the sequential boot path, and
+  "Starting proxy..." — which is printed before the reporter is even
+  installed, so it would have been the FIRST line of a `--json` run.
+  Both now route through the same stderr-when-json rule as the rest of
+  the narration, and the contract is pinned by tests rather than assumed
+  (two separate leaks have now been caught here).
+
+
 ## [0.8.1] — 2026-09-10
 
 ### Fixed

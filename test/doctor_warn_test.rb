@@ -162,3 +162,59 @@ class LogReportTest < Minitest::Test
     assert_equal "ok", event.status
   end
 end
+
+# The --json contract: stdout carries the machine-readable stream and
+# nothing else. Two separate leaks have been caught here — narrative
+# lines from the boot banner, and "Starting proxy..." printed before the
+# reporter is even installed — so the contract is pinned rather than
+# assumed.
+class JsonStdoutContractTest < Minitest::Test
+  # Every writer in the boot path must route through `say`, which sends
+  # narration to stderr when json is on.
+  def test_say_routes_to_stderr_in_json_mode
+    out = StringIO.new
+    err = StringIO.new
+    orig_out, orig_err = $stdout, $stderr
+    $stdout, $stderr = out, err
+    Yamine::CLI::BootCommand.send(:say, { json: true }, "narrative")
+    $stdout, $stderr = orig_out, orig_err
+
+    assert_empty out.string, "json mode must keep stdout clean"
+    assert_equal "narrative\n", err.string
+  end
+
+  def test_say_routes_to_stdout_for_humans
+    out = StringIO.new
+    orig_out = $stdout
+    $stdout = out
+    Yamine::CLI::BootCommand.send(:say, {}, "narrative")
+    $stdout = orig_out
+
+    assert_equal "narrative\n", out.string
+  end
+
+  # ensure_proxy! runs before the reporter exists; in json mode its one
+  # progress line must still avoid stdout.
+  def test_ensure_proxy_narration_avoids_stdout_in_json_mode
+    Yamine::ProxyControl.stubs(:listening?).returns(false)
+    Yamine::ProxyControl.stubs(:root?).returns(false)
+    Yamine::ProxyControl.stubs(:spawn_daemon).returns(123)
+    ctx = Yamine::CLI::Context.new
+    # interactive? so the unprivileged-start branch runs: the alternative
+    # is the deliberate `exit 1` for a non-interactive privileged port,
+    # which would take the test runner down with it.
+    ctx.stubs(:interactive?).returns(true)
+    out = StringIO.new
+    err = StringIO.new
+    orig_out, orig_err = $stdout, $stderr
+    $stdout, $stderr = out, err
+    begin
+      Yamine::CLI::BootCommand.send(:ensure_proxy!, ctx, json: true)
+    ensure
+      $stdout, $stderr = orig_out, orig_err
+    end
+
+    assert_empty out.string, "the proxy progress line must not break the JSON stream"
+    assert_match(/Starting proxy/, err.string)
+  end
+end

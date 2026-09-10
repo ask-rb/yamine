@@ -21,7 +21,7 @@ module Yamine
         # Ownership gate before any side effects: no proxy spawn, no
         # port allocation when we'd refuse anyway.
         check_worktree_ownership!(ctx, resolved, force: opts[:force])
-        ensure_proxy!(ctx)
+        ensure_proxy!(ctx, json: opts[:json])
         boot_all(ctx, resolved, opts)
       end
 
@@ -180,7 +180,7 @@ module Yamine
             rails_dev_host: item[:hostname], database_url: db_url)
           routes_registered << { hostnames: item[:hostnames], app: app }
 
-          puts "  -> #{item[:url]}"
+          say opts, "  -> #{item[:url]}"
         end
         children
       end
@@ -548,7 +548,11 @@ module Yamine
         Yamine::Resolver.resolve(Dir.pwd, variant: variant, tld: tld)
       end
 
-      def ensure_proxy!(ctx)
+      # json: keeps stdout free for the machine-readable stream — this runs
+      # BEFORE boot_all installs the reporter, so its progress line is the
+      # one piece of narration that could still land mid-JSON and break a
+      # parser on the first line of a --json run.
+      def ensure_proxy!(ctx, json: false)
         port = ctx.proxy_port
         tls = ctx.proxy_tls
         if ProxyControl.listening?(port)
@@ -570,7 +574,8 @@ module Yamine
           $stderr.puts "  Or start the proxy by hand: sudo yamine proxy start"
           exit 1
         end
-        puts "Starting proxy#{privileged ? " (sudo)" : ""}..."
+        starting = "Starting proxy#{privileged ? " (sudo)" : ""}..."
+        json ? $stderr.puts(starting) : puts(starting)
         begin
           Yamine::ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: privileged)
         rescue Yamine::ProxyNotRunningError => e
