@@ -38,6 +38,55 @@ class HostsTest < Minitest::Test
 
     assert Yamine::Hosts.synced?(["myapp.localhost"], @path)
   end
+
+  # sync must be a no-op when the block already matches. /etc/hosts is
+  # root-owned, so an unconditional rewrite fails without sudo — and both
+  # `setup` and every boot's workstation check call this. Without the
+  # guard, a machine whose hosts file was already correct got
+  # "could not write /etc/hosts (try sudo yamine hosts sync)" on every
+  # run, pointing at an elevated write for a file that needed nothing.
+  def test_sync_is_noop_when_already_synced
+    Yamine::Hosts.sync(["myapp.localhost"], @path)
+    before = File.read(@path)
+    mtime = File.mtime(@path)
+
+    assert Yamine::Hosts.sync(["myapp.localhost"], @path),
+      "an already-synced file must report success, not a failed rewrite"
+
+    assert_equal before, File.read(@path)
+    assert_equal mtime, File.mtime(@path), "the file must not be rewritten"
+  end
+
+  # The real-world shape: a root-owned file the process cannot write. If
+  # the block already matches, sync must succeed anyway.
+  def test_sync_succeeds_on_unwritable_file_when_already_correct
+    Yamine::Hosts.sync(["myapp.localhost"], @path)
+    File.chmod(0o444, @path)
+
+    assert Yamine::Hosts.sync(["myapp.localhost"], @path),
+      "a correct but unwritable /etc/hosts is not an error"
+  ensure
+    File.chmod(0o644, @path)
+  end
+
+  # ...and it still reports the failure when a rewrite IS needed.
+  def test_sync_fails_on_unwritable_file_when_change_needed
+    File.write(@path, "127.0.0.1 localhost\n")
+    File.chmod(0o444, @path)
+
+    refute Yamine::Hosts.sync(["myapp.localhost"], @path),
+      "a needed rewrite that cannot happen must be reported"
+  ensure
+    File.chmod(0o644, @path)
+  end
+
+  def test_sync_still_updates_when_hostnames_change
+    Yamine::Hosts.sync(["old.localhost"], @path)
+    Yamine::Hosts.sync(["new.localhost"], @path)
+
+    assert Yamine::Hosts.synced?(["new.localhost"], @path)
+    refute_includes File.read(@path), "old.localhost"
+  end
 end
 
 # resolves? backs the "will not resolve — run yamine hosts sync" warning

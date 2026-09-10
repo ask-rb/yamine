@@ -220,6 +220,8 @@ module Yamine
         hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
         if hostnames.empty?
           puts "    No routes registered yet — hosts sync will happen on the next boot."
+        elsif Yamine::Hosts.synced?(hostnames)
+          puts "    /etc/hosts already lists #{hostnames.length} hostname(s)."
         elsif Yamine::Hosts.sync(hostnames)
           puts "    Synced #{hostnames.length} hostname(s) to /etc/hosts."
         else
@@ -758,8 +760,12 @@ module Yamine
           end
         end
 
-        # 3. Hosts (best-effort: only needed for Safari; warn, don't fail)
-        unless Hosts.sync(ctx.store.load_routes.map { |r| r["hostname"] })
+        # 3. Hosts (best-effort: only needed for Safari and custom TLDs —
+        # Chrome/Firefox/Edge resolve *.localhost natively). Already-synced
+        # is the common case and must stay silent: warning there sent
+        # people to a sudo write for a file that needed nothing.
+        hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
+        unless hostnames.empty? || Yamine::Hosts.synced?(hostnames) || Hosts.sync(hostnames)
           warn "Warning: could not write /etc/hosts (try sudo yamine hosts sync)."
         end
       end

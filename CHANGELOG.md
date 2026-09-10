@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.1] — 2026-09-10
+
+### Fixed
+
+- **An already-correct `/etc/hosts` no longer reports a failure.**
+  `Hosts.sync` rewrote the file unconditionally, so on a normal machine
+  (where `/etc/hosts` is root-owned) it raised `Errno::EACCES`, returned
+  false, and made `yamine start` print "could not write /etc/hosts (try
+  sudo yamine hosts sync)" on every boot — pointing at an elevated write
+  for a file that already had exactly the right block. `synced?` existed
+  for precisely this guard but `sync` never consulted it. `sync` is now a
+  no-op returning true when the block already matches, and the setup step
+  reports "already lists N hostname(s)" instead of implying a failure.
+  Chrome/Firefox/Edge resolve `*.localhost` natively anyway; the file only
+  matters for Safari and custom TLDs.
+
+
 ## [0.8.0] — 2026-09-10
 
 ### Fixed

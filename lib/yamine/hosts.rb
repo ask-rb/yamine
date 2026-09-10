@@ -41,7 +41,20 @@ module Yamine
       names
     end
 
+    # Bring the managed block to exactly these hostnames. Idempotent: when
+    # the block already matches, this is a no-op returning true.
+    #
+    # The short-circuit is load-bearing, not an optimization. /etc/hosts is
+    # root-owned on a normal machine, so a rewrite fails without sudo — and
+    # `setup` and every boot's workstation check run this. Without the
+    # guard, a machine whose hosts file was already correct got a
+    # "could not write /etc/hosts (try sudo yamine hosts sync)" warning on
+    # every run, sending people to an elevated write for a file that
+    # needed nothing. (Chrome/Firefox/Edge resolve *.localhost natively;
+    # /etc/hosts only matters for Safari and custom TLDs.)
     def sync(hostnames, path = PATH)
+      return true if synced?(hostnames, path)
+
       content = read(path)
       block = managed_block(hostnames)
       if content.include?(BEGIN_MARKER)
