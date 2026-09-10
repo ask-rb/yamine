@@ -41,6 +41,15 @@ The only port-suffixed URLs are the ones you explicitly ask for:
 `yamine proxy start -p 1355` (CI/sandboxes where 443 is impossible).
 There the suffix is honest, and `YAMINE_URL` carries it faithfully.
 
+Because the port is recorded machine-wide, yamine refuses to let a
+one-off `-p` outlive its process: a recorded port is reused only while
+something is actually listening on it. Stop that proxy and the next
+`yamine` run goes back to the clean default (443) instead of quietly
+raising another proxy on 1355. `yamine doctor` and `yamine start` both
+say so out loud when a running proxy is on a non-default port — the
+`[warn]` line names the port, the `:PORT` it puts in every URL, and how
+to get back to 443.
+
 ## Port 443: one-time setup, then never again
 
 Binding 443 is privileged, so yamine installs a **root-owned launchd

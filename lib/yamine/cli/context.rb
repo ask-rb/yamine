@@ -15,8 +15,23 @@ module Yamine
         $stdin.tty? && ENV["CI"].nil?
       end
 
+      # The port the proxy is on, or the port it should be started on.
+      #
+      # The recorded port is machine-wide sticky state, and trusting it
+      # blindly is how a one-off `proxy start -p 1355` (CI, a sandbox, a
+      # gem-dev foreground proxy) downgrades the machine permanently: the
+      # file outlives the process, so the NEXT boot would raise a fresh
+      # proxy on 1355 and put a port in every URL again — the exact
+      # outcome yamine exists to prevent.
+      #
+      # So the recorded port is honored only while something is actually
+      # listening there. A dead proxy leaves the machine on the clean
+      # default (443), and an explicit YAMINE_PORT always wins.
       def proxy_port
-        ProxyControl.proxy_port(store) || ProxyControl.default_port(proxy_tls)
+        recorded = ProxyControl.proxy_port(store)
+        return recorded if recorded && ProxyControl.listening?(recorded)
+
+        ProxyControl.default_port(proxy_tls)
       end
 
       def proxy_tls

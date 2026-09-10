@@ -118,7 +118,7 @@ class ReadinessWaitAllTest < Minitest::Test
     port = Yamine::Ports.find_free
     pid, tmp = fake_tcp(port)
     apps = { "web" => { item: { entry: {}, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(pid) } }
-    results = Yamine::Readiness.wait_all(apps, out: nil)
+    results = Yamine::Readiness.wait_all(apps, sink: nil)
     assert_equal "ok", results.first[:status]
     assert_equal "web", results.first[:name]
   ensure
@@ -130,7 +130,7 @@ class ReadinessWaitAllTest < Minitest::Test
     port = Yamine::Ports.find_free
     sleeper = fork { sleep 999 }
     apps = { "web" => { item: { entry: { "healthcheck" => { "timeout" => 1 } }, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(sleeper) } }
-    results = Yamine::Readiness.wait_all(apps, out: nil)
+    results = Yamine::Readiness.wait_all(apps, sink: nil)
     assert_equal "timeout", results.first[:status]
     assert_match(/no healthy response/, results.first[:detail])
   ensure
@@ -143,7 +143,7 @@ class ReadinessWaitAllTest < Minitest::Test
     Process.wait(dead) rescue nil
     port = Yamine::Ports.find_free
     apps = { "web" => { item: { entry: {}, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(dead) } }
-    results = Yamine::Readiness.wait_all(apps, out: nil)
+    results = Yamine::Readiness.wait_all(apps, sink: nil)
     assert_equal "fail", results.first[:status]
     assert_match(/process exited/, results.first[:detail])
   end
@@ -152,7 +152,7 @@ class ReadinessWaitAllTest < Minitest::Test
     port = Yamine::Ports.find_free
     pid, tmp = fake_http_up(port)
     apps = { "web" => { item: { entry: { "healthcheck" => { "path" => "/up", "timeout" => 3 } }, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(pid) } }
-    results = Yamine::Readiness.wait_all(apps, out: nil)
+    results = Yamine::Readiness.wait_all(apps, sink: nil)
     assert_equal "ok", results.first[:status]
   ensure
     Process.kill("TERM", pid) rescue nil
@@ -171,7 +171,7 @@ class ReadinessWaitAllTest < Minitest::Test
     pid, tmp = fake_http_up(port)
     resolved_tls = fake_tls_proxy_state
     apps = { "web" => { item: { entry: { "healthcheck" => { "path" => "/up", "timeout" => 3 } }, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(pid) } }
-    results = Yamine::Readiness.wait_all(apps, out: nil)
+    results = Yamine::Readiness.wait_all(apps, sink: nil)
     assert_equal "ok", results.first[:status],
       "healthcheck must not speak TLS to the backend port (proxy tls=#{resolved_tls})"
   ensure
@@ -202,7 +202,7 @@ class ReadinessWaitAllTest < Minitest::Test
     port = Yamine::Ports.find_free
     pid, tmp = fake_http_500(port)
     apps = { "web" => { item: { entry: { "healthcheck" => { "path" => "/up", "timeout" => 1 } }, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(pid) } }
-    results = Yamine::Readiness.wait_all(apps, out: nil)
+    results = Yamine::Readiness.wait_all(apps, sink: nil)
     assert_includes %w[fail timeout], results.first[:status]
   ensure
     Process.kill("TERM", pid) rescue nil
@@ -218,7 +218,7 @@ class ReadinessWaitAllTest < Minitest::Test
       name = "p#{i}"
       [name, { item: { entry: {}, hostname: "#{name}.localhost", port: port }, app: Struct.new(:pid).new(pids[i]) }]
     end
-    results = Yamine::Readiness.wait_all(apps, out: nil)
+    results = Yamine::Readiness.wait_all(apps, sink: nil)
     assert_equal %w[ok ok], results.map { |r| r[:status] }.sort
   ensure
     pids&.each { |pid| Process.kill("TERM", pid) rescue nil }

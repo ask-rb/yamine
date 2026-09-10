@@ -55,5 +55,62 @@ module Yamine
         "#{bytes} B"
       end
     end
+
+    # Boot progress sinks. Readiness emits one Event per phase; the sink
+    # decides how to render it. Rendering lives here rather than in
+    # Readiness so the human stream and the --json stream carry exactly
+    # the same events — a phase added to the boot loop shows up in both
+    # without touching either renderer.
+    module Report
+      # "  [web] ok (2.2s) healthcheck /up returned 2xx-3xx" — one line
+      # per completed phase, in the boot banner's bracket style.
+      class Human
+        def initialize(io = $stderr)
+          @io = io
+        end
+
+        def event(event)
+          @io.puts "  [#{event.action}] #{event.status} " \
+            "(#{format_seconds(event.duration_ms)})#{detail(event)}"
+        end
+
+        def note(message)
+          @io.puts "  #{message}"
+        end
+
+        private
+
+        def detail(event)
+          d = event.detail.to_s.strip
+          d.empty? ? "" : " #{d}"
+        end
+
+        # Durations are read by humans deciding whether to wait; a
+        # sub-second boot should not render as "0.0s".
+        def format_seconds(ms)
+          return "0ms" if ms.nil? || ms < 1000
+
+          format("%.1fs", ms / 1000.0)
+        end
+      end
+
+      # One JSON object per line — the agent contract. Same events, no
+      # prose.
+      class Json
+        def initialize(io = $stdout)
+          @io = io
+        end
+
+        def event(event)
+          require "json"
+          @io.puts JSON.generate(event.to_h)
+        end
+
+        def note(message)
+          require "json"
+          @io.puts JSON.generate({ note: message })
+        end
+      end
+    end
   end
 end

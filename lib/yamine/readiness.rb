@@ -38,7 +38,10 @@ module Yamine
 
     # Run a phase with timing + timeout. Yields; returns the Event.
     # On timeout or raise, status is "fail" with the error as detail.
-    def phase(name, action, timeout: nil, out: nil)
+    #
+    # `sink` renders the event (Log::Report::Human for people, Json for
+    # agents); nil means silent. Readiness itself never formats output.
+    def phase(name, action, timeout: nil, sink: nil)
       timeout ||= DEFAULT_TIMEOUTS.fetch(name, 30)
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       event = nil
@@ -56,7 +59,7 @@ module Yamine
         event = Event.new(phase: name, action: action, status: "fail",
           duration_ms: ms, detail: e.message.lines.first&.strip)
       end
-      out&.puts(JSON.generate(event.to_h)) if out
+      sink&.event(event)
       event
     end
 
@@ -143,17 +146,17 @@ module Yamine
     # or "timeout" (never answered within its healthcheck timeout).
     # Dead-pid short-circuit: a reaped backend fails immediately
     # instead of burning its full timeout on connection-refused.
-    def wait_all(apps, out: nil)
+    def wait_all(apps, sink: nil)
       threads = apps.map do |name, slot|
         Thread.new do
-          Thread.current[:result] = wait_one(name, slot, out: out)
+          Thread.current[:result] = wait_one(name, slot, sink: sink)
         end
       end
       threads.each(&:join)
       threads.map { |t| t[:result] }
     end
 
-    def wait_one(name, slot, out:)
+    def wait_one(name, slot, sink:)
       item = slot[:item]
       app = slot[:app]
       hc = item[:entry]["healthcheck"] || {}
@@ -166,12 +169,12 @@ module Yamine
         unless process_alive?(app.pid)
           ms = elapsed_ms(started)
           return fail_result(name, started, ms,
-            "process exited before becoming healthy — see log/yamine-#{name}.log", out)
+            "process exited before becoming healthy — see log/yamine-#{name}.log", sink)
         end
         ok, detail = probe(item[:hostname], item[:port], path: path)
         if ok
           ms = elapsed_ms(started)
-          return ok_result(name, started, ms, path, out)
+          return ok_result(name, started, ms, path, sink)
         end
         last_error = detail
         sleep 0.5
@@ -182,22 +185,22 @@ module Yamine
         "process exited before becoming healthy — see log/yamine-#{name}.log"
       event = Event.new(phase: "process", action: name, status: status,
         duration_ms: ms, detail: detail)
-      out&.puts(JSON.generate(event.to_h)) if out
+      sink&.event(event)
       { name: name, status: status, phase: "process", detail: detail, duration_ms: ms }
     end
 
-    def ok_result(name, started, ms, path, out)
+    def ok_result(name, started, ms, path, sink)
       detail = path ? "healthcheck #{path} returned 2xx-3xx" : "port accepted connection"
       event = Event.new(phase: "process", action: name, status: "ok",
         duration_ms: ms, detail: detail)
-      out&.puts(JSON.generate(event.to_h)) if out
+      sink&.event(event)
       { name: name, status: "ok", phase: "process", detail: detail, duration_ms: ms }
     end
 
-    def fail_result(name, started, ms, detail, out)
+    def fail_result(name, started, ms, detail, sink)
       event = Event.new(phase: "process", action: name, status: "fail",
         duration_ms: ms, detail: detail)
-      out&.puts(JSON.generate(event.to_h)) if out
+      sink&.event(event)
       { name: name, status: "fail", phase: "process", detail: detail, duration_ms: ms }
     end
 

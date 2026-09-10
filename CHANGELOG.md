@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.7.0] — 2026-09-10
+
+Keeping the no-port promise when the machine's recorded port goes stale,
+and making boot legible while it happens.
+
+### Added
+
+- `Log::Report::Human` / `Log::Report::Json`: boot progress sinks, one
+  line per phase (`[web] ok (2.2s) healthcheck /up returned 2xx-3xx`).
+  `Readiness.phase`/`wait_all` take a `sink:` and never format output
+  themselves; `--json` emits one JSON object per event on stdout while
+  the human banner moves to stderr, so stdout stays parseable. The phase
+  events were previously computed and discarded — `opts[:events]` was
+  never set — so a 2-minute deps or healthcheck phase looked like a hang.
+- `ProxyControl.default_port?` / `port_notice`, and a `warn` state on
+  `Doctor::Check` (rendered `[warn]`, JSON `warn`/`warnings`, never
+  affecting exit status).
+
+### Fixed
+
+- **A stale recorded proxy port no longer sticks the machine on a
+  port.** `Context#proxy_port` trusted `proxy.port` unconditionally, so a
+  one-off `proxy start -p 1355` (CI, a sandbox, a gem-dev foreground
+  proxy) outlived its process: the next boot raised a fresh proxy on
+  1355 and put `:1355` in every URL — the single outcome yamine exists to
+  prevent. The recorded port is now honored only while something is
+  actually listening on it; otherwise the machine returns to the clean
+  default (443). An explicit `YAMINE_PORT` still wins.
+- **Attaching to a non-default port is now said out loud.** Both
+  `yamine start` and `yamine doctor` report it (`[warn] listening on port
+  1355 — every URL carries :1355 …`) instead of a bare "[ok] listening on
+  port 1355" that let a leftover dev proxy quietly downgrade every
+  project on the machine.
+- **`.localhost` no longer reports as unresolvable.** `Hosts.resolves?`
+  used `Resolv.getaddress` — a pure-Ruby DNS client with no nsswitch and
+  no RFC 6761 knowledge — so it returned "no address for
+  anyworkers.localhost" on a machine where `.localhost` resolves
+  perfectly, and `doctor` printed a `[FAIL] dns` while `yamine start`
+  advised `sudo yamine hosts sync` (an elevated /etc/hosts write) for a
+  problem that did not exist. It now asks the system resolver
+  (`Addrinfo.getaddrinfo`), which is what browsers and curl use.
+- `supervise_tree` names the process that exited and its log path
+  instead of "a process exited — cleaning up all routes".
+
 ## [0.6.1] — 2026-09-10
 
 ### Fixed

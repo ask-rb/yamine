@@ -4,7 +4,15 @@ module Yamine
   # Read-only health checks: proxy, routes, DNS, CA trust.
   # Never changes state; safe for agents to call any time.
   module Doctor
-    Check = Struct.new(:name, :ok, :message, keyword_init: true)
+    # `warn` is a third state between ok and FAIL: the check passed, but
+    # something is configured in a way the user should know about and
+    # probably did not choose (a port-suffixed URL). Warnings never
+    # affect the exit status — only failures do.
+    Check = Struct.new(:name, :ok, :message, :warn, keyword_init: true) do
+      def warn?
+        warn ? true : false
+      end
+    end
 
     module_function
 
@@ -66,11 +74,22 @@ module Yamine
         return Check.new(name: "proxy", ok: false,
           message: "port #{port} not listening — run: yamine proxy start")
       end
-      if ProxyControl.ours?(port, tls: tls)
-        Check.new(name: "proxy", ok: true, message: "listening on port #{port}")
-      else
-        Check.new(name: "proxy", ok: false,
+      unless ProxyControl.ours?(port, tls: tls)
+        return Check.new(name: "proxy", ok: false,
           message: "port #{port} is in use by another process")
+      end
+
+      # A proxy on a non-default port is legitimate — CI and sandboxes
+      # opt in with `-p` — but it makes EVERY url carry :PORT, which is
+      # the one thing yamine exists to avoid. Reporting that as a bare
+      # "[ok] listening on port 1355" let a stale dev proxy quietly
+      # downgrade every project on the machine.
+      notice = ProxyControl.port_notice(port, tls)
+      if notice
+        Check.new(name: "proxy", ok: true, warn: true,
+          message: "listening on port #{port} — #{notice}")
+      else
+        Check.new(name: "proxy", ok: true, message: "listening on port #{port}")
       end
     end
 
@@ -116,14 +135,18 @@ module Yamine
       if json
         require "json"
         out.puts JSON.generate({
-          checks: checks.map { |c| { name: c.name, ok: c.ok, message: c.message } },
-          failed: checks.count { |c| !c.ok }
+          checks: checks.map { |c| { name: c.name, ok: c.ok, warn: c.warn?, message: c.message } },
+          failed: checks.count { |c| !c.ok },
+          warnings: checks.count(&:warn?)
         })
         return checks.count { |c| !c.ok }
       end
       failed = 0
       checks.each do |c|
-        mark = c.ok ? "ok" : "FAIL"
+        mark = if !c.ok then "FAIL"
+        elsif c.warn? then "warn"
+        else "ok"
+        end
         failed += 1 unless c.ok
         out.puts "  [#{mark}] #{c.name}: #{c.message}"
       end

@@ -34,6 +34,26 @@ module Yamine
       tls ? DEFAULT_TLS_PORT : DEFAULT_PLAIN_PORT
     end
 
+    # Is this port the clean default for the current scheme — 443 for
+    # https, 80 for http? A default port yields bare
+    # `https://myapp.localhost` URLs; any other port appends :PORT to
+    # every one of them.
+    def default_port?(port, tls)
+      port == (tls ? DEFAULT_TLS_PORT : DEFAULT_PLAIN_PORT)
+    end
+
+    # Human explanation for a non-default port, or nil when the port is
+    # the clean default. Callers use this to surface the downgrade
+    # honestly instead of implying the proxy is misconfigured.
+    def port_notice(port, tls)
+      return nil if default_port?(port, tls)
+
+      "every URL carries :#{port} instead of a clean " \
+        "#{tls ? "https" : "http"}://<app>.localhost. Stop it and run " \
+        "`yamine setup` (or `yamine proxy start`) to move to port " \
+        "#{default_port(tls)}."
+    end
+
     def proxy_tls(store)
       marker = File.join(store.dir, "proxy.tls")
       return false if ENV["YAMINE_HTTPS"] == "0"

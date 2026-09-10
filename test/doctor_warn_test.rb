@@ -1,0 +1,132 @@
+# frozen_string_literal: true
+
+require_relative "test_helper"
+require "stringio"
+
+# A proxy on a non-default port is legitimate (CI, sandboxes opt in with
+# `-p`) but it makes every URL carry :PORT — the one thing yamine exists
+# to avoid. doctor used to report a stale dev proxy on 1355 as a bare
+# "[ok] listening on port 1355", which is how one leftover foreground
+# proxy silently downgraded every project on the machine.
+class DoctorPortWarnTest < Minitest::Test
+  def test_default_port_is_clean
+    assert_nil Yamine::ProxyControl.port_notice(443, true)
+    assert_nil Yamine::ProxyControl.port_notice(80, false)
+  end
+
+  def test_non_default_port_explains_the_downgrade
+    notice = Yamine::ProxyControl.port_notice(1355, true)
+
+    refute_nil notice
+    assert_match(/:1355/, notice)
+    assert_match(/yamine setup/, notice)
+  end
+
+  def test_default_port_predicate
+    assert Yamine::ProxyControl.default_port?(443, true)
+    assert Yamine::ProxyControl.default_port?(80, false)
+    refute Yamine::ProxyControl.default_port?(1355, true)
+    # 443 on plain http is NOT the default for that scheme.
+    refute Yamine::ProxyControl.default_port?(443, false)
+  end
+
+  def test_warning_renders_as_warn_not_ok_and_does_not_fail
+    checks = [
+      Yamine::Doctor::Check.new(name: "proxy", ok: true, warn: true,
+        message: "listening on port 1355 — every URL carries :1355"),
+      Yamine::Doctor::Check.new(name: "ca", ok: true, message: "CA trusted")
+    ]
+    out = StringIO.new
+    failed = Yamine::Doctor.print(checks, out: out)
+
+    assert_equal 0, failed, "a warning must not affect the exit status"
+    assert_match(/\[warn\] proxy/, out.string)
+    assert_match(/\[ok\] ca/, out.string)
+  end
+
+  def test_json_includes_warn_flag
+    checks = [Yamine::Doctor::Check.new(name: "proxy", ok: true, warn: true,
+      message: "port 1355")]
+    out = StringIO.new
+    Yamine::Doctor.print(checks, out: out, json: true)
+    payload = JSON.parse(out.string)
+
+    assert payload["checks"].first["warn"]
+    assert_equal 1, payload["warnings"]
+    assert_equal 0, payload["failed"]
+  end
+
+  def test_failure_still_fails
+    checks = [Yamine::Doctor::Check.new(name: "proxy", ok: false,
+      message: "not running")]
+    out = StringIO.new
+    failed = Yamine::Doctor.print(checks, out: out)
+
+    assert_equal 1, failed
+    assert_match(/\[FAIL\]/, out.string)
+  end
+end
+
+# Boot phase events used to be computed and discarded (opts[:events] was
+# never set), so a 2-minute healthcheck phase looked like a hang. The
+# sink is now wired through, and the human rendering is one line per
+# phase.
+class LogReportTest < Minitest::Test
+  def test_human_renders_phase_line
+    out = StringIO.new
+    sink = Yamine::Log::Report::Human.new(out)
+    event = Yamine::Readiness::Event.new(phase: :process, action: "web",
+      status: "ok", duration_ms: 2223, detail: "healthcheck /up returned 2xx-3xx")
+
+    sink.event(event)
+
+    assert_equal "  [web] ok (2.2s) healthcheck /up returned 2xx-3xx\n", out.string
+  end
+
+  def test_human_formats_sub_second_durations
+    out = StringIO.new
+    sink = Yamine::Log::Report::Human.new(out)
+    event = Yamine::Readiness::Event.new(phase: :deps, action: "deps",
+      status: "ok", duration_ms: 42, detail: nil)
+
+    sink.event(event)
+
+    assert_equal "  [deps] ok (0ms)\n", out.string
+  end
+
+  def test_human_note
+    out = StringIO.new
+    Yamine::Log::Report::Human.new(out).note("[db] myapp_development")
+
+    assert_equal "  [db] myapp_development\n", out.string
+  end
+
+  def test_json_emits_one_object_per_event
+    out = StringIO.new
+    sink = Yamine::Log::Report::Json.new(out)
+    sink.event(Yamine::Readiness::Event.new(phase: :deps, action: "deps",
+      status: "ok", duration_ms: 10, detail: "dependencies satisfied"))
+    sink.note("hello")
+
+    lines = out.string.lines
+    assert_equal 2, lines.length
+    assert_equal "deps", JSON.parse(lines[0])["phase"]
+    assert_equal "hello", JSON.parse(lines[1])["note"]
+  end
+
+  def test_phase_reports_to_sink
+    out = StringIO.new
+    sink = Yamine::Log::Report::Human.new(out)
+    event = Yamine::Readiness.phase(:deps, "deps", sink: sink) { "dependencies satisfied" }
+
+    assert_equal "ok", event.status
+    assert_match(/\[deps\] ok/, out.string)
+    assert_match(/dependencies satisfied/, out.string)
+  end
+
+  def test_phase_silent_without_sink
+    event = Yamine::Readiness.phase(:deps, "deps") { "fine" }
+
+    assert_equal "ok", event.status
+  end
+end

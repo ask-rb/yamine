@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "resolv"
+require "socket"
 require "timeout"
 
 module Yamine
@@ -72,10 +72,21 @@ module Yamine
       false
     end
 
+    # Does the hostname resolve for the programs that will actually use
+    # it — browsers, curl, the app's own HTTP clients? That question can
+    # only be answered by the SYSTEM resolver (getaddrinfo), which reads
+    # nsswitch (so /etc/hosts counts) and implements the RFC 6761
+    # special-use TLDs.
+    #
+    # Ruby's Resolv is a pure-Ruby DNS client: it never sees /etc/hosts
+    # and knows nothing about RFC 6761, so it reports "no address for
+    # myapp.localhost" on a machine where .localhost resolves perfectly.
+    # That false negative sent users to `sudo yamine hosts sync` — an
+    # elevated write to /etc/hosts — to fix a problem they did not have.
     def resolves?(hostname)
-      Timeout.timeout(2) { Resolv.getaddress(hostname) }
+      Timeout.timeout(2) { Addrinfo.getaddrinfo(hostname, nil) }
       true
-    rescue Resolv::ResolvError, SystemCallError, Timeout::Error
+    rescue SocketError, SystemCallError, Timeout::Error
       false
     end
 

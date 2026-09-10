@@ -25,6 +25,22 @@ module Yamine
         boot_all(ctx, resolved, opts)
       end
 
+      # Progress sink for the boot's phases. Human runs narrate to stderr
+      # (stdout is the payload); --json runs emit one JSON line per event
+      # on stdout. Without this the phase events were computed and thrown
+      # away (opts[:events] was never set), so a 2-minute dependency or
+      # healthcheck phase looked like a hang.
+      def reporter(json:)
+        json ? Log::Report::Json.new : Log::Report::Human.new
+      end
+
+      # Boot banner / URL lines. In --json mode they move to stderr so
+      # stdout stays pure JSON (one event per line, payload last) for
+      # agents that parse it; humans still get them on stdout.
+      def say(opts, message = "")
+        opts[:json] ? $stderr.puts(message) : puts(message)
+      end
+
       def run_explicit(ctx, args)
         run_inferred(ctx, args)
       end
@@ -43,7 +59,7 @@ module Yamine
         tld = resolved.tld
         host = resolved.host
         processes = resolved.processes
-        events = opts[:events]
+        events = opts[:events] || reporter(json: opts[:json])
 
         if processes.empty?
           $stderr.puts "Error: no processes in config/local.yml. Add at least one."
@@ -59,7 +75,7 @@ module Yamine
         # Pre-flight: verify runtime deps BEFORE spawning anything.
         # A missing bundle fails here in seconds with the fix, instead
         # of a 60s Puma crash-loop ending in "did not boot".
-        deps = Readiness.phase(:deps, "check", out: events) do
+        deps = Readiness.phase(:deps, "deps", sink: events) do
           ok, fix = Readiness.check_deps(Dir.pwd)
           raise fix unless ok
 
@@ -74,8 +90,8 @@ module Yamine
         children = []
         routes_registered = []
 
-        puts "yamine (#{service})"
-        puts "--"
+        say opts, "yamine (#{service})"
+        say opts, "--"
 
         # Per-worktree database: one database per directory so concurrent
         # agents never share tables. Resolved once, injected into every
@@ -86,14 +102,14 @@ module Yamine
         db_name = Database.name_for(Dir.pwd, env: rails_env,
           state_dir: ctx.store.dir)
         db_created, db_url = setup_database(ctx, resolved, db_name, events: events)
-        puts "  [db] #{db_name}#{db_created ? " (created)" : ""}" if db_url
+        events&.note("[db] #{db_name}#{db_created ? " (created)" : ""}") if db_url
 
         with_wait = !opts[:no_wait]
         spawn_plan = collect_spawns(ctx, runner, resolved, opts, db_url, children)
 
         if with_wait
           boot_concurrent(ctx, runner, resolved, opts, spawn_plan, children,
-            routes_registered, db_url, db_name, db_created)
+            routes_registered, db_url, db_name, db_created, events: events)
         else
           boot_sequential(ctx, runner, resolved, opts, spawn_plan, children,
             routes_registered, db_url, events: events)
@@ -101,17 +117,20 @@ module Yamine
 
         background = processes.select { |_, v| v["proxy"] == false }
         unless background.empty?
-          puts "  [background] #{background.keys.join(', ')}"
+          say opts, "  [background] #{background.keys.join(', ')}"
         end
 
-        puts
+        say opts
         ctx.report_unresolved(routes_registered.flat_map { |r| r[:hostnames] })
 
-        # Supervisor: exit when ANY child dies (loud cleanup).
-        all_pids = routes_registered.map { |r| r[:app].pid } + children.map { |c| c[:pid] }
+        # Supervisor: exit when ANY child dies (loud cleanup). pid => name
+        # so the message names the casualty instead of "a process".
+        named_pids = {}
+        routes_registered.each { |r| named_pids[r[:app].pid] = r[:app].name }
+        children.each { |c| named_pids[c[:pid]] = c[:name] }
         all_hostnames = routes_registered.flat_map { |r| r[:hostnames] }
-        trap_cleanup(ctx, all_hostnames, all_pids)
-        supervise_tree(ctx, all_hostnames, all_pids)
+        trap_cleanup(ctx, all_hostnames, named_pids.keys)
+        supervise_tree(ctx, all_hostnames, named_pids, reporter: events)
       end
 
       # One pass over config: background processes spawn immediately
@@ -148,7 +167,7 @@ module Yamine
       def boot_sequential(ctx, runner, resolved, opts, plan, children,
         routes_registered, db_url, events: nil)
         plan.each do |item|
-          puts "  [#{item[:name]}] #{item[:url]}"
+          say opts, "  [#{item[:name]}] #{item[:url]}"
           # Always allow the proxied hostname in Rails dev (Rails ignores
           # this env var when not a Rails app — safe for every framework).
           # DATABASE_URL points at this worktree's own database; non-Ruby
@@ -171,10 +190,10 @@ module Yamine
       # never leak into the proxy. A backend that dies before its route
       # registers is cleaned up like any other failed process.
       def boot_concurrent(ctx, runner, resolved, opts, plan, children,
-        routes_registered, db_url, db_name, db_created)
+        routes_registered, db_url, db_name, db_created, events: nil)
         apps = {}
         plan.each do |item|
-          puts "  [#{item[:name]}] #{item[:url]}"
+          say opts, "  [#{item[:name]}] #{item[:url]}"
           apps[item[:name]] = {
             item: item,
             app: runner.spawn_http(name: item[:name], hostname: item[:hostname],
@@ -183,7 +202,7 @@ module Yamine
               database_url: db_url, force: opts[:force])
           }
         end
-        wait_result = Readiness.wait_all(apps, out: nil)
+        wait_result = Readiness.wait_all(apps, sink: events)
         failed = wait_result.select { |r| r[:status] != "ok" }
 
         if failed.empty?
@@ -191,38 +210,45 @@ module Yamine
             runner.adopt(slot[:item][:hostname], slot[:app], force: opts[:force],
               spec: { "dir" => File.expand_path(Dir.pwd), "proc" => name })
             routes_registered << { hostnames: slot[:item][:hostnames], app: slot[:app] }
-            puts "  -> #{slot[:item][:url]}"
+            say opts, "  -> #{slot[:item][:url]}"
           end
         end
         finish_wait(ctx, resolved, apps, wait_result, failed, routes_registered,
           children, db_name, db_url, db_created, json: opts[:json])
       end
 
-      # --wait epilogue: on success the summary payload (URLs + per-process
-      # health) goes to stdout and boot continues into supervision. On
-      # failure every spawned child is killed and removed, the failure
-      # payload (failed phase + log tail) prints, and start exits 1 —
-      # no half-booted routes left behind.
+      # --wait epilogue. Success: the summary line and, with --json, the
+      # success payload on stdout (the human summary moves to stderr so
+      # stdout stays parseable). Failure: every spawned child is killed
+      # and removed, the failed phase + that process's log tail is
+      # reported, and start exits 1 — no half-booted routes left behind.
       def finish_wait(ctx, resolved, apps, wait_result, failed, routes_registered,
         children, db_name, db_url, db_created, json: false)
         urls = apps.transform_values { |slot| slot[:item][:url] }
+        summary = "ready: #{urls.map { |n, u| "#{n}=#{u}" }.join(" ")}"
+
         if failed.empty?
-          puts "ready: #{urls.map { |n, u| "#{n}=#{u}" }.join(" ")}"
           payload = Yamine::WaitPayload.success(resolved, wait_result, urls: urls,
-            db_name: db_name, db_url: db_url, created: db_created) if json
-          puts JSON.generate(payload) if json
+            db_name: db_name, db_url: db_url, created: db_created)
+          if json
+            $stderr.puts summary
+            puts JSON.generate(payload)
+          else
+            puts summary
+          end
           return
         end
 
         apps.each_value { |slot| stop_spawned(slot[:app]) }
         children.each { |c| stop_spawned_pid(c[:pid]) }
         first = failed.first
+        error = "Error: #{first[:name]} failed (#{first[:phase]}): #{first[:detail]}"
         payload = Yamine::WaitPayload.failure(resolved, wait_result, failed: first,
-          log_tail: tail_for(failed.first, apps))
+          log_tail: tail_for(first, apps))
+        $stderr.puts error
         if json
           puts JSON.generate(payload)
         else
-          $stderr.puts "Error: #{first[:name]} failed (#{first[:phase]}): #{first[:detail]}"
           $stderr.puts payload[:log_tail].to_s.lines.last(10).join if payload[:log_tail]
           $stderr.puts "Full log: #{payload[:log_path]}" if payload[:log_path]
         end
@@ -265,7 +291,7 @@ module Yamine
           force: opts[:force], rails_dev_host: nil, register: false,
           database_url: db_url)
         children << { name: proc_name, pid: app.pid }
-        puts "  [#{proc_name}] background (pid #{app.pid})"
+        say opts, "  [#{proc_name}] background (pid #{app.pid})"
       end
 
       # Refuse to boot over another agent's live routes unless forced.
@@ -335,7 +361,7 @@ module Yamine
         url = Database.url_for(db_name, template)
         return [false, nil] unless url
 
-        db_event = Readiness.phase(:db, "ensure #{db_name}", out: events) do
+        db_event = Readiness.phase(:db, "ensure #{db_name}", sink: events) do
           existed = Database.exists?(db_name, template)
           raise "database server unreachable — is postgres/mysql running?" unless Database.ensure_exists(db_name, template)
 
@@ -347,7 +373,7 @@ module Yamine
         end
         created = db_event.detail.to_s.start_with?("created")
 
-        schema_event = Readiness.phase(:schema, "load #{db_name}", out: events) do
+        schema_event = Readiness.phase(:schema, "load #{db_name}", sink: events) do
           next "skipped (already exists)" unless created
 
           run_schema_load(resolved, url)
@@ -437,15 +463,26 @@ module Yamine
         File.file?(File.join(Dir.pwd, "config", "application.rb"))
       end
 
-      def supervise_tree(ctx, hostnames, pids)
+      # Supervise the booted tree: the first child to exit ends the run,
+      # because a half-stack is worse than no stack — a dead jobs worker
+      # with a live web process looks healthy until someone wonders why
+      # nothing is being processed. Name the casualty and its log: "a
+      # process exited" left the user to guess which one, and the log
+      # worth reading is per-process.
+      def supervise_tree(ctx, hostnames, named_pids, reporter: nil)
         loop do
           sleep 0.5
-          if pids.any? { |pid| !ProxyControl.pid_alive?(pid) }
-            puts "\nA process exited — cleaning up all routes."
+          dead = named_pids.find { |pid, _| !ProxyControl.pid_alive?(pid) }
+          if dead
+            pid, name = dead
+            $stderr.puts "\n[#{name}] exited (pid #{pid}) — stopping the whole tree."
+            log = File.join(Dir.pwd, "log", "yamine-#{name}.log")
+            $stderr.puts "  log: #{log}" if File.file?(log)
+            reporter&.note("#{name} exited; cleaning up routes")
             cleanup_routes(ctx, hostnames)
             # Kill remaining children
-            pids.each do |pid|
-              Process.kill("TERM", pid) rescue nil
+            named_pids.each_key do |other|
+              Process.kill("TERM", other) rescue nil
             end
             exit 0
           end
@@ -515,7 +552,10 @@ module Yamine
         port = ctx.proxy_port
         tls = ctx.proxy_tls
         if ProxyControl.listening?(port)
-          return if ProxyControl.ours?(port, tls: tls)
+          if ProxyControl.ours?(port, tls: tls)
+            warn_non_default_port(port, tls)
+            return
+          end
           $stderr.puts "Error: port #{port} is in use by another process."
           $stderr.puts "  Stop it, or yamine proxy start -p <port>"
           exit 1
@@ -542,6 +582,24 @@ module Yamine
         $stderr.puts "Error: permission denied binding port #{port}."
         $stderr.puts "  Fix once: yamine setup"
         exit 1
+      end
+
+      # yamine's whole promise is a bare https://<app>.localhost. An
+      # already-running proxy on another port silently defeats it: every
+      # URL grows a :1355, which then leaks into OAuth callbacks, mailer
+      # hosts, and webhooks. The port file is machine-wide state, so a
+      # single `-p 1355` run (CI, a sandbox, a gem-dev foreground proxy)
+      # downgrades every project on the machine until someone notices.
+      #
+      # Not an error: CI and sandboxes opt into a port deliberately, and
+      # refusing would break them. So: proceed, but say plainly what the
+      # URL will look like and how to get the clean one back.
+      def warn_non_default_port(port, tls)
+        return if ENV["YAMINE_PORT"] && ENV["YAMINE_PORT"].to_i == port
+        notice = ProxyControl.port_notice(port, tls)
+        return unless notice
+
+        $stderr.puts "Warning: #{notice}"
       end
     end
   end
