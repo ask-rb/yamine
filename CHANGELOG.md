@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.9.3] — 2026-09-10
+
+### Fixed
+
+- **The trust store accumulated duplicate CAs, and cleanup deleted the
+  wrong one.** `trust_macos` never checked whether the certificate was
+  already trusted, so every `setup`/`trust` run added another copy, and
+  nothing ever removed the certificates left behind when a CA was
+  regenerated (missing, expiring, or renamed). One machine had **14
+  distinct trusted roots**, all named "Ask Local CA". Since a superseded
+  CA's private key stays on disk, a trusted root whose key is still
+  recoverable is a real liability. Trust is now idempotent, and
+  `prune_stale` removes trusted certificates under our CA names that are
+  not the CA currently on disk.
+- Cleanup no longer operates by common name. `untrust` ran
+  `delete-certificate -c "Ask Local CA"` up to five times per keychain,
+  which deletes an ARBITRARY certificate with that name — possibly the
+  current CA, or one a sibling checkout still serves — and can leave the
+  target behind. Everything now identifies certificates by SHA-1
+  fingerprint, and pruning additionally verifies the subject before
+  deleting, so an unrelated trusted root can never be touched.
+- `prune_stale` refuses to run while a proxy is serving: a live proxy
+  holds the CA it booted with in memory, so removing that certificate
+  would break TLS for every live route until a restart.
+
+### Changed
+
+- The CA keeps the legacy "Ask Local CA" name. Renaming it would
+  invalidate every existing CA (`valid_pair?` requires the name) and
+  force a regeneration plus re-trust on every machine — a real migration
+  cost for a cosmetic gain, and the name was never the actual problem.
+  `Certs::CA_COMMON_NAMES` lists every name we have generated so a future
+  rename stays prunable.
+
+
 ## [0.9.2] — 2026-09-10
 
 ### Fixed
