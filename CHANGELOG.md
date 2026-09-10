@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.1] — 2026-09-10
+
+### Fixed
+
+- **`proxy stop` no longer says "not running" while a root service is
+  serving.** With nothing recorded — the shape left by a service
+  installed by a gem version that did not record state — it returned
+  `:not_running` even though 443 answered, sending people to hunt for a
+  process that was right there. It now detects the serving proxy and
+  points at `sudo yamine service uninstall`.
+
+
 ## [0.9.0] — 2026-09-10
 
 ### Fixed

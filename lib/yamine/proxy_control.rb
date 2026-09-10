@@ -285,6 +285,12 @@ module Yamine
       pid = read_pid(store)
       port = proxy_port(store)
       if pid.nil?
+        # Nothing recorded, but a service can still be serving — a
+        # root-installed proxy from an older gem recorded no state at all,
+        # and "Proxy is not running." while 443 answers would be a lie
+        # that sends people looking for a process that is right there.
+        return :needs_root if serving_port(store)
+
         return :not_running unless port && listening?(port)
 
         return :unknown_process

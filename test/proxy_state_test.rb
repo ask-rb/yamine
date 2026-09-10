@@ -199,6 +199,22 @@ class ProxyStopPermissionTest < Minitest::Test
       "state must survive a stop we could not perform"
   end
 
+  # Nothing recorded, but our proxy is serving — the shape left by a
+  # root service installed by a gem that did not record state. Saying
+  # "not running" would send someone hunting for a process that is right
+  # there on 443.
+  def test_stop_reports_needs_root_when_only_the_service_is_serving
+    Yamine::ProxyControl.stubs(:serving_port).returns(443)
+
+    assert_equal :needs_root, Yamine::ProxyControl.stop(@store)
+  end
+
+  def test_stop_reports_not_running_when_truly_nothing_is_there
+    Yamine::ProxyControl.stubs(:serving_port).returns(nil)
+
+    assert_equal :not_running, Yamine::ProxyControl.stop(@store)
+  end
+
   def test_stop_clears_state_on_a_normal_stop
     Yamine::ProxyControl.write_proxy_state(@store, pid: 42_424, port: 443, tls: true)
     Yamine::ProxyControl.stubs(:pid_alive?).returns(true)
