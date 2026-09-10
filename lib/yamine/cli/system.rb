@@ -700,9 +700,15 @@ module Yamine
 
 
       # Quiet workstation setup for `start`: trust the CA, ensure a proxy
-      # on 443 (root service, sudo daemon fallback), and sync hosts.
-      # Each step is idempotent; only missing pieces run. Non-interactive
-      # CI without a proxy fails fast rather than prompting for sudo.
+      # on this run's port (443 by default — root service, sudo daemon
+      # fallback), and sync hosts. Each step is idempotent; only missing
+      # pieces run. Non-interactive CI without a proxy fails fast rather
+      # than prompting for sudo.
+      #
+      # The port comes from ctx, not a literal: YAMINE_PORT is the
+      # documented escape hatch for CI and sandboxes ("where 443 is
+      # impossible"), and hardcoding 443 here demanded root for a port
+      # those users had already chosen to avoid.
       def ensure_workstation!(ctx)
         # 1. CA
         unless Yamine::Certs.trusted?(ctx.store.dir)
@@ -714,19 +720,30 @@ module Yamine
           end
         end
 
-        # 2. Proxy on 443
-        port = 443
-        tls = true
+        # 2. Proxy on the port this run wants
+        port = ctx.proxy_port
+        tls = ctx.proxy_tls
         unless Yamine::ProxyControl.listening?(port) && ProxyControl.ours?(port, tls: tls)
-          if port < 1024 && !Yamine::ProxyControl.root? && !ctx.interactive?
-            abort_setup("Proxy is not running and port 443 needs root to bind.", *privileged_port_hint)
+          privileged = port < 1024
+          if privileged && !Yamine::ProxyControl.root? && !ctx.interactive?
+            abort_setup("Proxy is not running and port #{port} needs root to bind.", *privileged_port_hint)
           end
           ok =
             if ProxyControl.root?
               Yamine::CLI::SystemCommand.ensure_root_service(ctx)
             elsif ctx.interactive?
               begin
-                Yamine::ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: true)
+                Yamine::ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: privileged)
+                wait_for_ours(ctx, port, tls: tls)
+              rescue Yamine::ProxyNotRunningError, SystemCallError => e
+                warn "    daemon start failed: #{e.message.lines.first&.strip}"
+                false
+              end
+            elsif !privileged
+              # Non-interactive but unprivileged: nothing to elevate, so
+              # start the daemon directly instead of failing.
+              begin
+                Yamine::ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: false)
                 wait_for_ours(ctx, port, tls: tls)
               rescue Yamine::ProxyNotRunningError, SystemCallError => e
                 warn "    daemon start failed: #{e.message.lines.first&.strip}"
@@ -736,7 +753,8 @@ module Yamine
               false
             end
           unless ok
-            abort_setup("Proxy is not running and could not be started on port 443.", *privileged_port_hint)
+            abort_setup("Proxy is not running and could not be started on port #{port}.",
+              *privileged_port_hint)
           end
         end
 

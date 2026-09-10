@@ -90,4 +90,50 @@ class StartCommandTest < Minitest::Test
     end
     assert_includes err, "yamine setup"
   end
+
+  # ensure_workstation! hardcoded port 443, so YAMINE_PORT — the
+  # documented escape hatch for CI and sandboxes "where 443 is
+  # impossible" — was ignored by `yamine start`: it demanded root for a
+  # port the user had already chosen to avoid.
+  def test_ensure_workstation_uses_configured_port_not_443
+    ENV["YAMINE_PORT"] = "8443"
+    Yamine::Certs.stubs(:trusted?).returns(true)
+    Yamine::ProxyControl.stubs(:listening?).returns(false)
+    Yamine::ProxyControl.stubs(:ours?).returns(false)
+    Yamine::ProxyControl.stubs(:root?).returns(false)
+    ctx = Yamine::CLI::Context.new
+    ctx.stubs(:interactive?).returns(false)
+    spawned = nil
+    Yamine::ProxyControl.stubs(:spawn_daemon)
+      .with { |**kw| spawned = kw; true }
+    Yamine::CLI::SystemCommand.stubs(:wait_for_ours).returns(true)
+    Yamine::Hosts.stubs(:sync).returns(true)
+
+    Yamine::CLI::SystemCommand.ensure_workstation!(ctx)
+
+    assert_equal 8443, spawned[:port],
+      "an unprivileged YAMINE_PORT must be used, not 443"
+    assert_equal false, spawned[:sudo],
+      "8443 needs no elevation"
+  ensure
+    ENV.delete("YAMINE_PORT")
+  end
+
+  # The privileged path must still demand sudo and point at setup.
+  def test_ensure_workstation_still_requires_setup_for_default_port
+    ENV.delete("YAMINE_PORT")
+    Yamine::Certs.stubs(:trusted?).returns(true)
+    Yamine::ProxyControl.stubs(:listening?).returns(false)
+    Yamine::ProxyControl.stubs(:ours?).returns(false)
+    Yamine::ProxyControl.stubs(:root?).returns(false)
+    ctx = Yamine::CLI::Context.new
+    ctx.stubs(:interactive?).returns(false)
+    Yamine::CLI::Context.any_instance.stubs(:proxy_port).returns(443)
+    _code, _out, err = capture do
+      Yamine::CLI::SystemCommand.ensure_workstation!(ctx)
+    end
+
+    assert_includes err, "needs root"
+    assert_includes err, "yamine setup"
+  end
 end

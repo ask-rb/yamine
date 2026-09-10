@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.1] — 2026-09-10
+
+### Fixed
+
+- **`yamine start` now honors `YAMINE_PORT`.** `ensure_workstation!`
+  hardcoded port 443, so the documented escape hatch for CI and
+  sandboxes — "where 443 is impossible" — was ignored: with
+  `YAMINE_PORT=8443` on a non-interactive machine, `start` aborted with
+  "port 443 needs root to bind" and demanded sudo for a port the user
+  had deliberately chosen to avoid. The port and scheme now come from
+  the context, and an unprivileged port is started directly instead of
+  being treated as a setup failure. The root path is unchanged: 443 on a
+  non-interactive machine still points at `yamine setup`.
+
 ## [0.7.0] — 2026-09-10
 
 Keeping the no-port promise when the machine's recorded port goes stale,
