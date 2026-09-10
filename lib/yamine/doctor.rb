@@ -174,11 +174,45 @@ module Yamine
       unless File.file?(paths[:cert])
         return Check.new(name: "ca", ok: false, message: "no CA yet — run: yamine trust")
       end
-      if Certs.trusted?(dir)
-        Check.new(name: "ca", ok: true, message: "CA trusted")
-      else
-        Check.new(name: "ca", ok: false, message: "CA not trusted — run: yamine trust")
+      unless Certs.trusted?(dir)
+        return Check.new(name: "ca", ok: false, message: "CA not trusted — run: yamine trust")
       end
+
+      # Trusted CAs that are not the one now on disk. They accumulate from
+      # CA regeneration (missing, expiring, or renamed — the ask-local
+      # rename regenerates every machine's CA), and a trusted root whose
+      # superseded private key is still on disk is a liability. Pruning
+      # only happens when `trust` runs, so after a rename it would wait
+      # for the next missing-CA event — i.e. possibly forever. Surface it
+      # here with the one command that clears it.
+      stale = stale_ca_count(dir)
+      if stale.positive?
+        Check.new(name: "ca", ok: true, warn: true,
+          message: "CA trusted, but #{stale} superseded CA(s) are still trusted" \
+            " — run: yamine trust")
+      else
+        Check.new(name: "ca", ok: true, message: "CA trusted")
+      end
+    end
+
+    # How many trusted certificates carry one of our CA names without
+    # being the CA currently on disk. Best-effort: 0 when the keychain
+    # cannot be read (doctor must never fail on a read-only probe).
+    def stale_ca_count(dir = Certs.state_dir)
+      return 0 unless Trust.respond_to?(:keychain_certs)
+
+      current = Trust.fingerprint_of(Certs.ca_paths(dir)[:cert])
+      return 0 unless current
+
+      names = Certs.ca_common_names
+      Trust.keychains.sum do |keychain|
+        Trust.keychain_certs(keychain).count do |entry|
+          entry[:fingerprint] != current &&
+            names.any? { |n| entry[:subject].include?(n) }
+        end
+      end
+    rescue StandardError
+      0
     end
 
     def print(checks, out: $stdout, json: false)

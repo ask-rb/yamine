@@ -264,3 +264,53 @@ class CaFreshnessOrderingTest < Minitest::Test
     following ? source[start, following.begin(0) + 1] : source[start..]
   end
 end
+
+# Pruning only happens when `trust` runs, so a CA left trusted by the
+# rename (or any regeneration) would otherwise wait for the next
+# missing-CA event — possibly forever. doctor surfaces it with the one
+# command that clears it.
+class StaleCaReportingTest < Minitest::Test
+  def test_counts_trusted_cas_that_are_not_the_current_one
+    current = Struct.new(:fingerprint, :subject).new("CURRENT", "/CN=Yamine CA")
+    stale = Struct.new(:fingerprint, :subject).new("STALE", "/CN=Ask Local CA")
+    Yamine::Trust.stubs(:fingerprint_of).returns("CURRENT")
+    Yamine::Trust.stubs(:keychains).returns(["/tmp/kc"])
+    Yamine::Trust.stubs(:keychain_certs).returns([current, stale])
+
+    assert_equal 1, Yamine::Doctor.stale_ca_count
+  end
+
+  def test_ignores_unrelated_trusted_roots
+    other = Struct.new(:fingerprint, :subject).new("OTHER", "/CN=Some Corp Root CA")
+    Yamine::Trust.stubs(:fingerprint_of).returns("CURRENT")
+    Yamine::Trust.stubs(:keychains).returns(["/tmp/kc"])
+    Yamine::Trust.stubs(:keychain_certs).returns([other])
+
+    assert_equal 0, Yamine::Doctor.stale_ca_count,
+      "a CA that is not ours must never be counted or reported"
+  end
+
+  def test_is_silent_when_the_keychain_cannot_be_read
+    Yamine::Trust.stubs(:fingerprint_of).returns("CURRENT")
+    Yamine::Trust.stubs(:keychains).returns(["/tmp/kc"])
+    Yamine::Trust.stubs(:keychain_certs).raises(StandardError, "nope")
+
+    assert_equal 0, Yamine::Doctor.stale_ca_count,
+      "doctor is read-only and must not fail on an unreadable keychain"
+  end
+
+  def test_warns_through_the_ca_check_when_stale_cas_exist
+    dir = Dir.mktmpdir
+    Yamine::Certs.ensure_ca(dir)
+    Yamine::Certs.mark_trusted(dir)
+    Yamine::Doctor.stubs(:stale_ca_count).returns(2)
+
+    check = Yamine::Doctor.check_ca
+
+    assert check.warn?
+    assert_match(/2 superseded CA\(s\) are still trusted/, check.message)
+    assert_match(/yamine trust/, check.message, "must name the command that clears it")
+  ensure
+    FileUtils.remove_entry(dir) if dir && File.directory?(dir)
+  end
+end

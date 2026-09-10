@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.10.2] — 2026-09-10
+
+### Added
+
+- `doctor` reports trusted CAs that are no longer the one on disk
+  (`[warn] ca: CA trusted, but N superseded CA(s) are still trusted —
+  run: yamine trust`). Pruning only runs inside `trust`, so after a CA
+  regeneration (including the rename) a superseded root would sit in the
+  keychain waiting for the next missing-CA event — possibly forever.
+  Unrelated trusted roots are never counted, and an unreadable keychain
+  stays silent: doctor is a read-only probe and must not fail.
+
+
 ## [0.10.1] — 2026-09-10
 
 ### Fixed
