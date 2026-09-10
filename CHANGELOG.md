@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.2] — 2026-09-10
+
+### Fixed
+
+- **doctor's version check was blind to its own motivating case.** A
+  serving proxy that recorded no version predates the marker (added in
+  0.9.0), which means it is definitely not the code you have installed —
+  but with `version == nil` the check stayed silent. So the exact service
+  it exists to catch, a root service left behind by an older gem, kept
+  serving old code with doctor reporting `[ok] proxy state: consistent`.
+  It now warns and points at `sudo yamine service install`. (A machine
+  with no proxy at all is still silent — no version and nothing serving
+  is not a problem.)
+
+
 ## [0.9.1] — 2026-09-10
 
 ### Fixed

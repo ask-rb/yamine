@@ -159,6 +159,25 @@ class DoctorProxyStateTest < Minitest::Test
     assert_match(/service install/, check.message)
   end
 
+  # The service that prompted this check: installed by a gem older than
+  # the version marker, so it reports no version at all. Silence here was
+  # the version check being blind to its own motivating case.
+  def test_warns_when_a_serving_proxy_reports_no_version
+    check = Yamine::Doctor.check_proxy_state(@store, 443)
+
+    assert check.warn?
+    assert_match(/does not report a version/, check.message)
+    assert_match(/service install/, check.message)
+  end
+
+  # ...but no version AND nothing serving is just a machine with no proxy.
+  def test_no_version_without_a_serving_proxy_is_not_a_warning
+    check = Yamine::Doctor.check_proxy_state(@store, nil)
+
+    assert check.ok
+    refute check.warn?
+  end
+
   def test_consistent_state_is_ok_not_warn
     Yamine::ProxyControl.write_proxy_state(@store, pid: 1, port: 443, tls: true)
     check = Yamine::Doctor.check_proxy_state(@store, 443)

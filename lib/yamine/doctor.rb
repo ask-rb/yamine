@@ -124,6 +124,15 @@ module Yamine
       if version && version != Yamine::VERSION
         problems << "the running proxy is v#{version}, this CLI is v#{Yamine::VERSION}" \
           " — re-register it: sudo yamine service install"
+      elsif version.nil? && serving
+        # A serving proxy that recorded no version predates the marker
+        # (added in 0.9.0), so it is definitely not the code we ship with
+        # now. Without this the version check was blind to exactly the
+        # service it exists to catch — an old root service keeps serving
+        # old code until it is re-registered.
+        problems << "the running proxy does not report a version (installed before " \
+          "v0.9.0), this CLI is v#{Yamine::VERSION}" \
+          " — re-register it: sudo yamine service install"
       end
 
       if problems.empty?
