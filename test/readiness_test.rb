@@ -118,7 +118,7 @@ class ReadinessWaitAllTest < Minitest::Test
     port = Yamine::Ports.find_free
     pid, tmp = fake_tcp(port)
     apps = { "web" => { item: { entry: {}, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(pid) } }
-    results = Yamine::Readiness.wait_all(apps, tls: false)
+    results = Yamine::Readiness.wait_all(apps, out: nil)
     assert_equal "ok", results.first[:status]
     assert_equal "web", results.first[:name]
   ensure
@@ -130,7 +130,7 @@ class ReadinessWaitAllTest < Minitest::Test
     port = Yamine::Ports.find_free
     sleeper = fork { sleep 999 }
     apps = { "web" => { item: { entry: { "healthcheck" => { "timeout" => 1 } }, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(sleeper) } }
-    results = Yamine::Readiness.wait_all(apps, tls: false)
+    results = Yamine::Readiness.wait_all(apps, out: nil)
     assert_equal "timeout", results.first[:status]
     assert_match(/no healthy response/, results.first[:detail])
   ensure
@@ -143,7 +143,7 @@ class ReadinessWaitAllTest < Minitest::Test
     Process.wait(dead) rescue nil
     port = Yamine::Ports.find_free
     apps = { "web" => { item: { entry: {}, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(dead) } }
-    results = Yamine::Readiness.wait_all(apps, tls: false)
+    results = Yamine::Readiness.wait_all(apps, out: nil)
     assert_equal "fail", results.first[:status]
     assert_match(/process exited/, results.first[:detail])
   end
@@ -152,18 +152,57 @@ class ReadinessWaitAllTest < Minitest::Test
     port = Yamine::Ports.find_free
     pid, tmp = fake_http_up(port)
     apps = { "web" => { item: { entry: { "healthcheck" => { "path" => "/up", "timeout" => 3 } }, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(pid) } }
-    results = Yamine::Readiness.wait_all(apps, tls: false)
+    results = Yamine::Readiness.wait_all(apps, out: nil)
     assert_equal "ok", results.first[:status]
   ensure
     Process.kill("TERM", pid) rescue nil
     tmp&.unlink rescue nil
   end
 
+  # A healthcheck probes the app's own listener, which is plaintext even
+  # when the proxy serves the route over https. Every call site used to
+  # pass the proxy's tls flag, so any app declaring `healthcheck: { path: }`
+  # could never boot under the default (TLS-on) proxy: the probe started an
+  # SSL handshake against a PLAIN puma, which answers each attempt with
+  # "Invalid HTTP format... Are you trying to open an SSL connection to a
+  # non-SSL Puma?" and the boot died on timeout.
+  def test_healthcheck_probes_backend_plaintext_even_with_tls_proxy
+    port = Yamine::Ports.find_free
+    pid, tmp = fake_http_up(port)
+    resolved_tls = fake_tls_proxy_state
+    apps = { "web" => { item: { entry: { "healthcheck" => { "path" => "/up", "timeout" => 3 } }, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(pid) } }
+    results = Yamine::Readiness.wait_all(apps, out: nil)
+    assert_equal "ok", results.first[:status],
+      "healthcheck must not speak TLS to the backend port (proxy tls=#{resolved_tls})"
+  ensure
+    Process.kill("TERM", pid) rescue nil
+    tmp&.unlink rescue nil
+  end
+
+  def fake_tls_proxy_state
+    dir = Dir.mktmpdir
+    File.write(File.join(dir, "proxy.tls"), "1")
+    ENV["YAMINE_STATE_DIR"] = dir
+    Yamine::ProxyControl.proxy_tls(Yamine::RouteStore.new(dir))
+  ensure
+    ENV.delete("YAMINE_STATE_DIR")
+    FileUtils.remove_entry(dir) rescue nil
+  end
+
+  # The probe surface itself has no tls keyword: TLS is the proxy's job,
+  # and Readiness dials localhost backends directly.
+  def test_probe_signatures_reject_tls
+    refute_includes Yamine::Readiness.method(:probe).parameters.map(&:last), :tls
+    refute_includes Yamine::Readiness.method(:probe_http).parameters.map(&:last), :tls
+    refute_includes Yamine::Readiness.method(:wait_all).parameters.map(&:last), :tls
+    refute_includes Yamine::Readiness.method(:wait_healthy).parameters.map(&:last), :tls
+  end
+
   def test_wait_all_healthcheck_path_non_2xx_is_unhealthy
     port = Yamine::Ports.find_free
     pid, tmp = fake_http_500(port)
     apps = { "web" => { item: { entry: { "healthcheck" => { "path" => "/up", "timeout" => 1 } }, hostname: "app.localhost", port: port }, app: Struct.new(:pid).new(pid) } }
-    results = Yamine::Readiness.wait_all(apps, tls: false)
+    results = Yamine::Readiness.wait_all(apps, out: nil)
     assert_includes %w[fail timeout], results.first[:status]
   ensure
     Process.kill("TERM", pid) rescue nil
@@ -179,7 +218,7 @@ class ReadinessWaitAllTest < Minitest::Test
       name = "p#{i}"
       [name, { item: { entry: {}, hostname: "#{name}.localhost", port: port }, app: Struct.new(:pid).new(pids[i]) }]
     end
-    results = Yamine::Readiness.wait_all(apps, tls: false)
+    results = Yamine::Readiness.wait_all(apps, out: nil)
     assert_equal %w[ok ok], results.map { |r| r[:status] }.sort
   ensure
     pids&.each { |pid| Process.kill("TERM", pid) rescue nil }

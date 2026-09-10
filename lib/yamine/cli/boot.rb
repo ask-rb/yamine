@@ -183,7 +183,7 @@ module Yamine
               database_url: db_url, force: opts[:force])
           }
         end
-        wait_result = Readiness.wait_all(apps, tls: ctx.proxy_tls, out: nil)
+        wait_result = Readiness.wait_all(apps, out: nil)
         failed = wait_result.select { |r| r[:status] != "ok" }
 
         if failed.empty?

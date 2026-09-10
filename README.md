@@ -95,7 +95,9 @@ Optional top-level `db: false` opts out of per-worktree databases
 (exotic setups — manual `establish_connection`, shared staging DB, …);
 `db.schema_load` overrides the schema-load command. Per-process
 `healthcheck: { path: /up, timeout: 30 }` declares what `--wait` polls
-(TCP accept when absent).
+(TCP accept when absent). The poll is plain HTTP against the app's own
+`127.0.0.1:$PORT` listener — TLS is terminated by the proxy, so the path
+is reached over http regardless of the `https://` URL in the banner.)
 
 `yamine init` creates the file (migrating an existing Procfile);
 Rails apps need no extra gem — yamine injects `RAILS_DEVELOPMENT_HOSTS`

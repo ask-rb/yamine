@@ -1,6 +1,23 @@
 # Changelog
 
-## [0.6.0] — Unreleased
+## [0.6.1] — 2026-09-10
+
+### Fixed
+
+- **Healthchecks no longer speak TLS to the backend.** `--wait` probed
+  `127.0.0.1:$PORT` — the app's own listener — with the *proxy's* `tls`
+  flag, so any app declaring `healthcheck: { path: }` could never boot
+  under the default TLS-on proxy: the probe began an SSL handshake
+  against a plaintext Puma, which logged `Invalid HTTP format, parsing
+  fails. Are you trying to open an SSL connection to a non-SSL Puma?`
+  once per attempt until the process phase timed out and the whole boot
+  was torn down. TLS is the proxy's job; the proxy dials backends with a
+  bare `TCPSocket`, so `Readiness.probe`/`probe_http`/`wait_healthy`/
+  `wait_all` drop the `tls:` keyword entirely (an `https://` banner URL
+  never implied the backend speaks TLS). Reported from anyworkers, whose
+  web process healthchecks `/up`.
+
+## [0.6.0] — 2026-09-09
 
 `yamine start --wait` + boot readiness protocol. The remaining gap from
 “one-storey building” onwards: boot had no definitive answer — agents

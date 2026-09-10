@@ -3,7 +3,6 @@
 require "json"
 require "net/http"
 require "open3"
-require "openssl"
 require "socket"
 require "timeout"
 require "uri"
@@ -89,11 +88,17 @@ module Yamine
     # Poll an HTTP route until healthy or timeout. Healthy = healthcheck
     # path returns 2xx-3xx, or (no healthcheck) TCP accept on the port.
     # Returns [healthy, detail].
-    def wait_healthy(hostname, port:, tls:, path: nil, timeout: 30)
+    #
+    # Probes are plaintext by construction: the target is the app's OWN
+    # listener (127.0.0.1:$PORT). TLS is terminated by the proxy, which
+    # dials backends with a bare TCPSocket (Proxy#connect_backend), so a
+    # `tls:` flag taken from the proxy must never reach here — an
+    # https:// URL in the banner does not mean the backend speaks TLS.
+    def wait_healthy(hostname, port:, path: nil, timeout: 30)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
       last_error = "not yet attempted"
       until Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-        ok, detail = probe(hostname, port, tls: tls, path: path)
+        ok, detail = probe(hostname, port, path: path)
         return [true, nil] if ok
 
         last_error = detail
@@ -102,9 +107,9 @@ module Yamine
       [false, last_error]
     end
 
-    def probe(hostname, port, tls:, path: nil)
+    def probe(hostname, port, path: nil)
       if path
-        probe_http(hostname, port, tls: tls, path: path)
+        probe_http(hostname, port, path: path)
       else
         probe_tcp(port)
       end
@@ -117,10 +122,8 @@ module Yamine
       [false, e.message.lines.first&.strip]
     end
 
-    def probe_http(hostname, port, tls:, path:)
+    def probe_http(hostname, port, path:)
       http = Net::HTTP.new("127.0.0.1", port)
-      http.use_ssl = tls
-      http.verify_mode = OpenSSL::SSL::VERIFY_NONE if tls
       http.open_timeout = 3
       http.read_timeout = 5
       res = http.get(path, { "Host" => hostname })
@@ -140,17 +143,17 @@ module Yamine
     # or "timeout" (never answered within its healthcheck timeout).
     # Dead-pid short-circuit: a reaped backend fails immediately
     # instead of burning its full timeout on connection-refused.
-    def wait_all(apps, tls: true, out: nil)
+    def wait_all(apps, out: nil)
       threads = apps.map do |name, slot|
         Thread.new do
-          Thread.current[:result] = wait_one(name, slot, tls: tls, out: out)
+          Thread.current[:result] = wait_one(name, slot, out: out)
         end
       end
       threads.each(&:join)
       threads.map { |t| t[:result] }
     end
 
-    def wait_one(name, slot, tls:, out:)
+    def wait_one(name, slot, out:)
       item = slot[:item]
       app = slot[:app]
       hc = item[:entry]["healthcheck"] || {}
@@ -165,7 +168,7 @@ module Yamine
           return fail_result(name, started, ms,
             "process exited before becoming healthy — see log/yamine-#{name}.log", out)
         end
-        ok, detail = probe(item[:hostname], item[:port], tls: tls, path: path)
+        ok, detail = probe(item[:hostname], item[:port], path: path)
         if ok
           ms = elapsed_ms(started)
           return ok_result(name, started, ms, path, out)
