@@ -46,6 +46,28 @@ yamine log [-f]           # tail the web process log
 stable URLs, background ones are supervised without routes. A process
 that exits cleans up the whole tree.
 
+The boot narrates every phase — deps, db, schema, and each process's
+healthcheck — one line per phase, so a slow boot is never a black box:
+
+```
+  [deps] ok (479ms) dependencies satisfied
+  [web] ok (2.2s) healthcheck /up returned 2xx-3xx
+```
+
+With `--json` the same events stream to stdout as one JSON object per
+line, flushed as they happen (safe to read incrementally), and the
+human banner moves to stderr — so stdout stays parseable and the final
+payload is the last line:
+
+```
+{"phase":"deps","action":"deps","status":"ok","duration_ms":479,...}
+{"phase":"process","action":"web","status":"ok","duration_ms":2223,...}
+{"ok":true,"service":"myapp","urls":{"web":"https://myapp.localhost"},...}
+```
+
+On failure the payload carries the failed phase, that process's log tail,
+and the log path — no need to go digging.
+
 ## Cross-service wiring
 
 ```bash

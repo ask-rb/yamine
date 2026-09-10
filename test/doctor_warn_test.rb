@@ -114,6 +114,38 @@ class LogReportTest < Minitest::Test
     assert_equal "hello", JSON.parse(lines[1])["note"]
   end
 
+  # stdout is block-buffered when piped, which is how agents read the
+  # --json stream: without a per-line flush the progress events stay in
+  # the buffer until it fills or the process exits, so a slow boot looks
+  # frozen — the exact failure the stream exists to prevent.
+  def test_json_flushes_each_line
+    io = FlushSpy.new
+    sink = Yamine::Log::Report::Json.new(io)
+    sink.event(Yamine::Readiness::Event.new(phase: :process, action: "web",
+      status: "ok", duration_ms: 5, detail: nil))
+    sink.note("second")
+
+    assert_equal 2, io.flushes, "each emitted line must be flushed"
+  end
+
+  # An IO that records how often it was flushed.
+  class FlushSpy
+    attr_reader :flushes
+
+    def initialize
+      @flushes = 0
+      @buffer = +""
+    end
+
+    def puts(line)
+      @buffer << line << "\n"
+    end
+
+    def flush
+      @flushes += 1
+    end
+  end
+
   def test_phase_reports_to_sink
     out = StringIO.new
     sink = Yamine::Log::Report::Human.new(out)

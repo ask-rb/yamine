@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0] — 2026-09-10
+
+### Fixed
+
+- **`--json` progress is flushed as it happens.** stdout is
+  block-buffered when it is a pipe — exactly how an agent reads the
+  stream — so the per-phase events added in 0.7.0 stayed in the buffer
+  until it filled or the process exited, making a slow boot look frozen.
+  That is the "poll and guess" behaviour the JSON stream exists to
+  replace. Every line is now flushed before the next phase runs.
+
+### Changed
+
+- The yamine agent skill documents the boot stream: the human
+  phase lines, the `--json` contract (one flushed object per line, human
+  banner on stderr, payload last), and that failures carry the log tail
+  and path.
+
 ## [0.7.1] — 2026-09-10
 
 ### Fixed

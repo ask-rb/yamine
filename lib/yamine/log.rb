@@ -96,6 +96,12 @@ module Yamine
 
       # One JSON object per line — the agent contract. Same events, no
       # prose.
+      #
+      # Every line is flushed. stdout is block-buffered when it is a pipe
+      # or a file, which is exactly how an agent reads it, so without the
+      # flush the whole progress stream stays invisible until the buffer
+      # fills or the process exits — the "poll and guess" behaviour the
+      # JSON stream exists to replace, now with extra steps.
       class Json
         def initialize(io = $stdout)
           @io = io
@@ -103,12 +109,18 @@ module Yamine
 
         def event(event)
           require "json"
-          @io.puts JSON.generate(event.to_h)
+          emit(event.to_h)
         end
 
         def note(message)
-          require "json"
-          @io.puts JSON.generate({ note: message })
+          emit({ note: message })
+        end
+
+        private
+
+        def emit(payload)
+          @io.puts JSON.generate(payload)
+          @io.flush if @io.respond_to?(:flush)
         end
       end
     end
