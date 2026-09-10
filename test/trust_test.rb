@@ -22,29 +22,17 @@ class TrustTest < Minitest::Test
   end
 
   def test_ca_common_name_constant_resolves
-    assert_equal "Ask Local CA", Yamine::Certs::CA_COMMON_NAME
+    assert_equal "Yamine CA", Yamine::Certs::CA_COMMON_NAME
   end
 
-  # The name is kept from the ask-local era on purpose: valid_pair? keys
-  # off it, so changing it would invalidate every existing CA and force a
-  # regeneration + re-trust on every machine. Cleanup no longer depends on
-  # the name (it uses fingerprints), which is what made the name a problem
-  # in the first place.
-  def test_renaming_the_ca_would_force_a_regeneration
-    dir = Dir.mktmpdir
-    paths = Yamine::Certs.ensure_ca(dir)
-    cert = OpenSSL::X509::Certificate.new(File.read(paths[:cert]))
+  # Every CA name we have ever generated must stay prunable, or machines
+  # that trusted a pre-rename CA can never shed it.
+  def test_prunable_names_cover_current_and_legacy
+    names = Yamine::Certs.ca_common_names
 
-    assert cert.subject.to_s.include?(Yamine::Certs::CA_COMMON_NAME),
-      "the on-disk CA must carry CA_COMMON_NAME or valid_pair? regenerates it"
-  ensure
-    FileUtils.remove_entry(dir) if dir && File.directory?(dir)
-  end
-
-  # The prunable-names list exists so a future rename can still shed old
-  # certificates; it must always cover the name currently in use.
-  def test_prunable_names_cover_the_current_name
-    assert_includes Yamine::Certs.ca_common_names, Yamine::Certs::CA_COMMON_NAME
+    assert_includes names, Yamine::Certs::CA_COMMON_NAME
+    assert_includes names, "Ask Local CA",
+      "the pre-rename name must stay prunable"
   end
 
   # Deleting by common name removes an ARBITRARY certificate with that
@@ -82,31 +70,111 @@ class TrustTest < Minitest::Test
     FileUtils.remove_entry(@dir) if @dir && File.directory?(@dir)
   end
 
-  # our_cert? decides whether a certificate may be deleted, so it must
-  # actually find the certificate among ALL of them. It once omitted `-a`,
-  # and `security find-certificate` then returns a SINGLE certificate —
-  # so the subject check silently answered "not ours" for every one but
-  # the first, and stale CAs were never pruned.
-  def test_our_cert_asks_for_all_certificates
+  # keychain_certs decides what may be deleted, so it must see ALL
+  # certificates. The earlier version omitted `-a`, and `security
+  # find-certificate` then returns a SINGLE certificate — so matching
+  # silently failed for every entry but the first, and stale CAs were
+  # never pruned.
+  def test_keychain_scan_asks_for_all_certificates
     args_seen = nil
     status = Struct.new(:success?).new(false)
     Yamine::Command.expects(:capture2)
       .with { |*args| args_seen = args; true }
       .returns(["", status])
 
-    Yamine::Trust.our_cert?("/tmp/kc", "ABC", ["Yamine CA"])
+    Yamine::Trust.keychain_certs("/tmp/kc")
 
     assert_includes args_seen, "-a",
       "without -a only one certificate is returned and matching breaks"
   end
 
-  # Pruning must never run while a proxy is serving: the live proxy holds
-  # the CA it booted with in memory, so removing that certificate would
-  # break TLS for every live route.
-  def test_prune_is_skipped_while_a_proxy_serves
-    Yamine::Trust.stubs(:serving_proxy?).returns(true)
-    Yamine::Command.expects(:capture2).never
+  # The live proxy's CA must survive pruning even though it is not the
+  # CA on disk — a running proxy signs from the CA it booted with, and
+  # superseded CAs share a name with it, so only a signature check can
+  # tell them apart.
+  def test_prune_spares_the_ca_a_live_proxy_signs_with
+    dir = Dir.mktmpdir
+    on_disk = Yamine::Certs.ensure_ca(Dir.mktmpdir)
+    live_ca = Yamine::Certs.ensure_ca(Dir.mktmpdir)
+    stale_ca = Yamine::Certs.ensure_ca(Dir.mktmpdir)
+    leaf = mint_leaf(live_ca)
 
-    assert_equal 0, Yamine::Trust.prune_stale
+    entries = [on_disk, live_ca, stale_ca].map do |paths|
+      { fingerprint: Yamine::Trust.fingerprint_of(paths[:cert]),
+        subject: "/CN=#{Yamine::Certs::CA_COMMON_NAME}",
+        cert: cert_of(paths[:cert]) }
+    end
+    deleted = []
+    Yamine::Trust.stubs(:fingerprint_of).returns(entries[0][:fingerprint])
+    Yamine::Trust.stubs(:keychain_certs).returns(entries)
+    Yamine::Trust.stubs(:live_proxy_cert).returns(leaf)
+    Yamine::Command.stubs(:capture2).returns(["", Struct.new(:success?).new(true)])
+    Yamine::Command.stubs(:capture2)
+      .with { |*args| args.include?("delete-certificate") && (deleted << args[3]; true) }
+      .returns(["", Struct.new(:success?).new(true)])
+
+    count = Yamine::Trust.prune_stale(dir, keychains: ["/tmp/kc"])
+
+    assert_equal 1, count
+    assert_equal [entries[2][:fingerprint]], deleted,
+      "the on-disk CA and the live proxy's CA must both be spared"
+  ensure
+    FileUtils.remove_entry(dir) if dir && File.directory?(dir)
+  end
+
+  # A certificate that signed nothing we can find is not protected by the
+  # signature check — only the live proxy's issuer is.
+  def test_signed_by_is_a_real_signature_check
+    ca = Yamine::Certs.ensure_ca(Dir.mktmpdir)
+    other = Yamine::Certs.ensure_ca(Dir.mktmpdir)
+    leaf = mint_leaf(ca)
+
+    assert Yamine::Trust.signed_by?(leaf, cert_of(ca[:cert])),
+      "the issuing CA must match"
+    refute Yamine::Trust.signed_by?(leaf, cert_of(other[:cert])),
+      "an unrelated CA must not be mistaken for the issuer"
+  end
+
+  def cert_of(path)
+    OpenSSL::X509::Certificate.new(File.read(path))
+  end
+
+  def mint_leaf(ca_paths)
+    Yamine::Certs.mint_host("probe.localhost", cert_of(ca_paths[:cert]),
+      OpenSSL::PKey.read(File.read(ca_paths[:key]))).first
+  end
+end
+
+# The service identity was an ask-local leftover ("dev.ask.local"), and a
+# label is how launchctl addresses a service — so installing the renamed
+# service while the old plist is still loaded would leave TWO root
+# proxies fighting over port 443, the loser crash-looping under
+# KeepAlive.
+class ServiceLabelTest < Minitest::Test
+  def test_label_is_renamed
+    assert_equal "dev.yamine", Yamine::CLI::SystemCommand::LAUNCHD_LABEL
+  end
+
+  def test_legacy_label_is_cleared
+    assert_includes Yamine::CLI::SystemCommand::LEGACY_LAUNCHD_LABELS, "dev.ask.local",
+      "the pre-rename service must be booted out, or both proxies fight over 443"
+  end
+
+  def test_install_uses_the_label_constant_not_a_literal
+    source = File.read(File.join(__dir__, "..", "lib", "yamine", "cli", "system.rb"))
+    install = source[/def install_launchd(.*?)^      end/m, 1]
+
+    assert_includes install, "LAUNCHD_LABEL"
+    refute_match(/dev\.ask\.local/, install,
+      "install must not hardcode the legacy label")
+  end
+
+  def test_remove_legacy_launchd_is_called_on_install_and_uninstall
+    source = File.read(File.join(__dir__, "..", "lib", "yamine", "cli", "system.rb"))
+    install = source[/def install_launchd(.*?)^      end/m, 1]
+    uninstall = source[/def service_uninstall(.*?)^      end/m, 1]
+
+    assert_includes install, "remove_legacy_launchd"
+    assert_includes uninstall, "remove_legacy_launchd"
   end
 end

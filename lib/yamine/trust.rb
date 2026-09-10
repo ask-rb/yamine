@@ -32,8 +32,8 @@ module Yamine
     end
 
     # The fingerprint `security -Z` prints: uppercase hex, no colons.
-    # Certificates are identified by THIS, never by common name — every
-    # CA yamine has ever generated is called "Ask Local CA", so a
+    # Certificates are identified by THIS, never by common name: every CA
+    # this project has generated shares a name with the others, so a
     # by-name lookup or delete cannot tell the current CA from a stale
     # one and may remove the wrong certificate.
     def fingerprint_of(cert_path)
@@ -44,19 +44,40 @@ module Yamine
       nil
     end
 
-    # Fingerprints of certificates already in a keychain, optionally
-    # limited to one common name. Empty when the keychain (or `security`)
-    # is unavailable — callers treat that as "cannot tell".
-    def keychain_fingerprints(keychain, common_name: nil)
-      args = ["security", "find-certificate", "-a", "-Z"]
-      args += ["-c", common_name] if common_name
-      args << keychain
-      out, status = Command.capture2(*args)
+    # Certificates in a keychain as { fingerprint:, subject:, cert: }.
+    # Parsed in ONE call; empty when the keychain (or `security`) is
+    # unavailable, which callers treat as "cannot tell".
+    #
+    # -a is required: without it `security find-certificate` returns a
+    # single certificate, so any scan silently sees one entry and every
+    # comparison against it is wrong.
+    def keychain_certs(keychain)
+      out, status = Command.capture2("security", "find-certificate", "-a", "-Z", "-p", keychain)
       return [] unless status.success?
 
-      out.scan(/SHA-1 hash:\s*([0-9A-Fa-f]+)/).flatten.map(&:upcase)
+      require "digest"
+      out.split("-----BEGIN CERTIFICATE-----").filter_map do |block|
+        next unless block.include?("-----END CERTIFICATE-----")
+
+        cert = begin
+          OpenSSL::X509::Certificate.new("-----BEGIN CERTIFICATE-----" + block)
+        rescue OpenSSL::OpenSSLError
+          next
+        end
+        { fingerprint: Digest::SHA1.hexdigest(cert.to_der).upcase,
+          subject: cert.subject.to_s,
+          cert: cert }
+      end
     rescue SystemCallError
       []
+    end
+
+    # Fingerprints of certificates in a keychain, optionally limited to
+    # one common name.
+    def keychain_fingerprints(keychain, common_name: nil)
+      certs = keychain_certs(keychain)
+      certs = certs.select { |c| c[:subject].include?(common_name) } if common_name
+      certs.map { |c| c[:fingerprint] }
     end
 
     def keychains
@@ -64,73 +85,114 @@ module Yamine
     end
 
     # Remove trusted certificates that carry one of our CA names but are
-    # not the CA currently on disk.
+    # neither the CA on disk nor the one a live proxy is signing with.
     #
-    # Regeneration is normal (the CA is rebuilt when it is missing, when
-    # it is expiring, or when its name changes), and each rebuild
-    # produced a new certificate that was trusted and NEVER removed: one
-    # machine accumulated 14 distinct trusted roots, all named
-    # "Ask Local CA". Apple's keychain keeps its own copy, so deleting
-    # the state dir does not untrust anything, and a trusted root whose
-    # superseded private key is still on disk (or in a backup) is a real
-    # liability.
+    # Regeneration is normal (the CA is rebuilt when it is missing,
+    # expiring, or renamed), and each rebuild produced a new certificate
+    # that was trusted and NEVER removed: one machine accumulated 14
+    # distinct trusted roots, all named "Ask Local CA". Apple's keychain
+    # keeps its own copy, so deleting the state dir does not untrust
+    # anything, and a trusted root whose superseded private key is still
+    # on disk (or in a backup) is a real liability.
     #
-    # Never runs while a proxy is serving. A running proxy holds the CA
-    # it booted with in memory, so removing that certificate from the
-    # trust store would break TLS for every live route until a restart —
-    # worse than the cruft. It is deferred to the next trust/setup with
-    # no proxy running, which is also when a superseded CA is genuinely
-    # idle.
-    def prune_stale(dir = Certs.state_dir, keychains: nil, force: false)
-      return 0 if !force && serving_proxy?
-
+    # The running proxy's CA is protected by SIGNATURE, not by name:
+    # `server_context` loads the CA once at startup and the SNI callback
+    # mints host certs from that in-memory copy, so a live proxy keeps
+    # using its boot-time CA whatever is on disk. Deleting that
+    # certificate would break TLS for every live route until a restart,
+    # and since superseded CAs share a name with the live one, only a
+    # signature check can tell them apart.
+    def prune_stale(dir = Certs.state_dir, keychains: nil)
       current = fingerprint_of(Certs.ca_paths(dir)[:cert])
       return 0 unless current
 
       names = Certs.ca_common_names
+      leaf = live_proxy_cert
       (keychains || self.keychains).sum do |keychain|
-        keychain_fingerprints(keychain)
-          .select { |fp| fp != current && our_cert?(keychain, fp, names) }
-          .count do |fp|
-            Command.capture2("security", "delete-certificate", "-Z", fp, keychain)
-            true
-          end
+        keychain_certs(keychain).count do |entry|
+          next false if entry[:fingerprint] == current
+          next false unless names.any? { |n| entry[:subject].include?(n) }
+          next false if leaf && signed_by?(leaf, entry[:cert])
+
+          Command.capture2("security", "delete-certificate", "-Z", entry[:fingerprint], keychain)
+          true
+        end
       end
     rescue SystemCallError
       0
     end
 
-    def serving_proxy?
-      return false unless defined?(ProxyControl)
-
-      !ProxyControl.serving_port(RouteStore.new(Certs.state_dir)).nil?
+    # True when `cert` is the issuer of `leaf` — i.e. that CA signed it.
+    # This is what identifies the live proxy's CA exactly.
+    def signed_by?(leaf, cert)
+      leaf.verify(cert.public_key)
     rescue StandardError
       false
     end
 
-    # Is the certificate with this fingerprint one of ours? Decided by
-    # reading its subject, so pruning only ever removes certificates
-    # under a name we generated — never an unrelated trusted root.
-    #
-    # -a is required: without it `security` returns a single certificate,
-    # so the subject check silently answered "not ours" for every
-    # certificate but one.
-    def our_cert?(keychain, fingerprint, names)
-      out, status = Command.capture2("security", "find-certificate", "-a", "-Z", "-p", keychain)
-      return false unless status.success?
+    # A certificate minted by the running proxy, whose issuer is the CA it
+    # is signing with, or nil when no proxy is serving.
+    def live_proxy_cert(store = nil)
+      return nil unless defined?(ProxyControl)
 
-      require "digest"
-      out.split("-----BEGIN CERTIFICATE-----").any? do |block|
-        next false unless block.include?("-----END CERTIFICATE-----")
+      store ||= RouteStore.new(Certs.state_dir)
+      port = ProxyControl.serving_port(store)
+      return nil unless port
 
-        cert = begin
-          OpenSSL::X509::Certificate.new("-----BEGIN CERTIFICATE-----" + block)
-        rescue OpenSSL::OpenSSLError
-          next false
-        end
-        next false unless Digest::SHA1.hexdigest(cert.to_der).upcase == fingerprint
+      proxy_peer_cert(port)
+    rescue StandardError
+      nil
+    end
 
-        names.any? { |n| cert.subject.to_s.include?(n) }
+    def proxy_peer_cert(port, host = "yamine-ca-probe.localhost")
+      sock = TCPSocket.new("127.0.0.1", port)
+      ctx = OpenSSL::SSL::SSLContext.new
+      ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
+      ssl = OpenSSL::SSL::SSLSocket.new(sock, ctx)
+      ssl.hostname = host if ssl.respond_to?(:hostname=)
+      ssl.connect
+      ssl.peer_cert
+    ensure
+      begin
+        ssl&.close
+      rescue StandardError
+        nil
+      end
+      begin
+        sock&.close unless sock.nil? || sock.closed?
+      rescue StandardError
+        nil
+      end
+    end
+
+    # The common name of the CA a running proxy actually signs with,
+    # read from the issuer of a certificate it mints, or nil when no
+    # proxy is serving or the name cannot be determined.
+    def serving_ca_common_name(store = nil)
+      leaf = live_proxy_cert(store)
+      return nil unless leaf
+
+      leaf.issuer.to_s[/CN=([^\/,]+)/, 1]
+    end
+
+    def proxy_peer_cert(port, host = "yamine-ca-probe.localhost")
+      sock = TCPSocket.new("127.0.0.1", port)
+      ctx = OpenSSL::SSL::SSLContext.new
+      ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
+      ssl = OpenSSL::SSL::SSLSocket.new(sock, ctx)
+      ssl.hostname = host if ssl.respond_to?(:hostname=)
+      ssl.connect
+      ssl.peer_cert
+    ensure
+      begin
+        ssl&.close
+      rescue StandardError
+        nil
+      end
+      begin
+        sock&.close unless sock.nil? || sock.closed?
+      rescue StandardError
+        nil
       end
     end
 

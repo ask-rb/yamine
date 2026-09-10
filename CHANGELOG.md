@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.10.0] — 2026-09-10
+
+The ask-local rename is finished: the two user-visible names it left
+behind are now yamine's own, and both migrate existing machines.
+
+### Changed
+
+- **The CA is named "Yamine CA"** (was "Ask Local CA", inherited from
+  the rename). The old name stays in `Certs::LEGACY_CA_COMMON_NAMES`, so
+  a machine carrying a pre-rename CA can still shed it. Because
+  `valid_pair?` requires the on-disk CA to carry the current name, the
+  first run after upgrading generates a new CA and re-trusts it — once,
+  automatically, as part of the normal trust path.
+- **The launchd service is `dev.yamine`** (was `dev.ask.local`). The old
+  plist is booted out and deleted during install and uninstall: a label
+  is how launchctl addresses a service, so leaving the old one loaded
+  would put two root proxies in a race for port 443, the loser
+  crash-looping under `KeepAlive`.
+
+### Fixed
+
+- `prune_stale` protects the CA a running proxy signs with, identified
+  by signature rather than by skipping the prune entirely. A proxy loads
+  its CA once at startup and mints host certs from that in-memory copy,
+  so it keeps signing with its boot-time CA whatever is on disk —
+  removing that certificate would break TLS for every live route until a
+  restart. Since superseded CAs share a name with the live one, only a
+  signature check can tell them apart.
+
+
 ## [0.9.3] — 2026-09-10
 
 ### Fixed

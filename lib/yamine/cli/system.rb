@@ -4,6 +4,13 @@ module Yamine
   class CLI
     # System commands: proxy, service, hosts, trust, clean, doctor, kamal.
     module SystemCommand
+      # The launchd label: the service's identity, and what `launchctl
+      # enable/kickstart/bootout` address it by. Renamed from "dev.ask.local"
+      # (an ask-local leftover); the old label is cleared on install so the
+      # two never coexist and fight over port 443.
+      LAUNCHD_LABEL = "dev.yamine"
+      LEGACY_LAUNCHD_LABELS = %w[dev.ask.local].freeze
+
       module_function
 
       def doctor(ctx, args)
@@ -291,7 +298,7 @@ module Yamine
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>Label</key><string>dev.ask.local</string>
+            <key>Label</key><string>#{LAUNCHD_LABEL}</string>
             <key>ProgramArguments</key>
             <array>
               <string>#{RbConfig.ruby}</string>
@@ -309,7 +316,8 @@ module Yamine
           </dict>
           </plist>
         PLIST
-        path = File.join(dir, "dev.ask.local.plist")
+        remove_legacy_launchd(dir)
+        path = File.join(dir, "#{LAUNCHD_LABEL}.plist")
         File.write(path, plist)
         File.chmod(0o644, path)
         # launchd requires /Library/LaunchDaemons plists to be
@@ -354,12 +362,32 @@ module Yamine
         unless Command.run("launchctl", "bootstrap", "system", path)
           raise Error, "launchctl bootstrap failed — check the plist at #{path}"
         end
-        Command.run("launchctl", "enable", "system/dev.ask.local")
-        Command.run("launchctl", "kickstart", "-k", "system/dev.ask.local")
+        Command.run("launchctl", "enable", "system/#{LAUNCHD_LABEL}")
+        Command.run("launchctl", "kickstart", "-k", "system/#{LAUNCHD_LABEL}")
       end
 
       def launchctl_bootout(path)
         Command.run("launchctl", "bootout", "system", path)
+      end
+
+      # The launchd label, and the pre-rename one that must be cleared.
+      # A label is the service's identity: installing the new one while
+      # the old plist is still loaded would leave TWO root proxies
+      # fighting over port 443 (whichever booted last wins, and the loser
+      # crash-loops under KeepAlive).
+      #
+      # Boot out and delete any plist from a previous label. Idempotent:
+      # bootout on a service that was never loaded prints an error and
+      # exits non-zero, which is expected and quiet.
+      def remove_legacy_launchd(dir = "/Library/LaunchDaemons")
+        LEGACY_LAUNCHD_LABELS.each do |label|
+          path = File.join(dir, "#{label}.plist")
+          next unless File.file?(path)
+
+          Command.run("launchctl", "bootout", "system", path, out: File::NULL, err: File::NULL)
+          FileUtils.rm_f(path)
+          puts "    Removed legacy launchd service #{label}."
+        end
       end
 
       # Pure unit-file builder (testable without root). Binds 80/443 at
@@ -406,9 +434,12 @@ module Yamine
         end
         case RUBY_PLATFORM
         when /darwin/
-          path = "/Library/LaunchDaemons/dev.ask.local.plist"
-          launchctl_bootout(path)
+          path = "/Library/LaunchDaemons/#{LAUNCHD_LABEL}.plist"
+          launchctl_bootout(path) if File.file?(path)
           FileUtils.rm_f(path)
+          # Also clear any pre-rename service, so uninstall leaves no root
+          # proxy behind on a machine upgraded from an older yamine.
+          remove_legacy_launchd
           puts "Removed root LaunchDaemon."
         when /linux/
           Command.run("systemctl", "disable", "--now", "yamine")

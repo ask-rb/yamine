@@ -11,23 +11,15 @@ module Yamine
   # through the SNI callback and held in an in-memory LRU
   # (puma-dev ssl.go does the same; portless caches on disk instead).
   module Certs
-    # The name is inherited from the rename (ask-local → yamine) and is
-    # kept deliberately: `valid_pair?` below requires the on-disk CA to
-    # carry this name, so changing it would mark every existing CA
-    # invalid, forcing a regeneration and a re-trust (elevation / GUI
-    # auth) on every machine — a real migration cost for a cosmetic gain.
-    #
-    # The name was ALSO never the actual problem: cleanup used to delete
-    # by common name, which is ambiguous when several CAs share it. That
-    # is fixed by operating on fingerprints (see Trust), so names no
-    # longer decide what gets removed.
-    #
-    # CA_COMMON_NAMES is the list of names we have ever generated. Add to
-    # it on any future rename so old certificates stay prunable —
-    # Trust.prune_stale only ever removes certificates whose subject is
-    # one of these.
-    CA_COMMON_NAME = "Ask Local CA"
-    CA_COMMON_NAMES = [CA_COMMON_NAME].freeze
+    # The CA's name is user-visible in the trust store and is what a
+    # cleanup keys off, so it belongs to this gem alone. It was inherited
+    # from the ask-local rename and had said "Ask Local CA" ever since.
+    CA_COMMON_NAME = "Yamine CA"
+    # Every name we have ever generated a CA under. Stale certificates
+    # under these are prunable (Trust.prune_stale); anything else in the
+    # trust store is none of our business. The pre-rename name stays here
+    # so machines that trusted an ask-local CA can still shed it.
+    LEGACY_CA_COMMON_NAMES = ["Ask Local CA"].freeze
     CA_VALIDITY_DAYS = 3650
     HOST_VALIDITY_DAYS = 825
     CACHE_SIZE = 1024
@@ -35,7 +27,7 @@ module Yamine
     module_function
 
     def ca_common_names
-      CA_COMMON_NAMES
+      [CA_COMMON_NAME, *LEGACY_CA_COMMON_NAMES].uniq
     end
 
     def state_dir
