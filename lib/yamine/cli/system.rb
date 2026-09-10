@@ -70,6 +70,14 @@ module Yamine
           if foreground
             write_tls_marker(ctx, tls)
             write_tlds_file(ctx, tlds)
+            # Record BEFORE serving. This process (the launchd/systemd
+            # service, or a hand-run foreground proxy) IS the proxy, and
+            # every reader trusts these files: doctor, Context's URL
+            # building, the supervisor, `proxy stop`. Not recording left
+            # the previous proxy's port on disk, so a machine serving
+            # clean 443 still advertised :8443 everywhere.
+            ProxyControl.write_proxy_state(ctx.store,
+              pid: Process.pid, port: port, tls: tls)
             sup = Supervisor.new(store: ctx.store, runner: Runner.new(store: ctx.store),
               on_event: ->(m) { warn m })
             sup.start
@@ -85,6 +93,13 @@ module Yamine
           when :stale then puts "Removed stale proxy state."
           when :not_running then puts "Proxy is not running."
           when :unknown_process then puts "Port in use by an unknown process."
+          when :needs_root
+            # A root service keeps serving; say so rather than implying
+            # success. Uninstalling is the real answer — signalling it
+            # would just leave launchd's KeepAlive restarting it.
+            $stderr.puts "The proxy runs as root (the launchd/systemd service)."
+            $stderr.puts "  Uninstall it: sudo yamine service uninstall"
+            exit 1
           end
         else
           raise Error, "Usage: yamine proxy [start|stop]"
@@ -282,6 +297,7 @@ module Yamine
               <string>#{RbConfig.ruby}</string>
               <string>#{ProxyControl.bin_path}</string>
               <string>proxy</string><string>start</string><string>--foreground</string>
+              <string>--port</string><string>#{ProxyControl::DEFAULT_TLS_PORT}</string>
             </array>
             <key>EnvironmentVariables</key>
             <dict>
@@ -357,7 +373,7 @@ module Yamine
           After=network.target
 
           [Service]
-          ExecStart=#{RbConfig.ruby} #{ProxyControl.bin_path} proxy start --foreground
+          ExecStart=#{RbConfig.ruby} #{ProxyControl.bin_path} proxy start --foreground --port #{ProxyControl::DEFAULT_TLS_PORT}
           Environment=YAMINE_STATE_DIR=#{state_dir}
           Environment=HOME=#{home}
 

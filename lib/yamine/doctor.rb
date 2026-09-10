@@ -18,12 +18,18 @@ module Yamine
 
     def run(store:, port: nil, tls: nil)
       checks = []
-      port ||= ProxyControl.proxy_port(store)
       tls = ProxyControl.proxy_tls(store) if tls.nil?
+      # Prove ownership rather than trusting the port file: doctor is
+      # where a wrong answer is expensive, and a connection is cheap. This
+      # finds the proxy on the scheme default even when a stale port file
+      # says otherwise, which is how a root service serving clean 443 went
+      # unreported while doctor warned about a dead 8443.
+      port ||= ProxyControl.serving_port(store)
 
       checks << check_state_dir(store)
       checks << check_disk(store)
       checks << check_proxy(port, tls: tls)
+      checks << check_proxy_state(store, port)
       checks << check_routes(store)
       checks << check_dns(store)
       checks << check_ca
@@ -90,6 +96,41 @@ module Yamine
           message: "listening on port #{port} — #{notice}")
       else
         Check.new(name: "proxy", ok: true, message: "listening on port #{port}")
+      end
+    end
+
+    # The recorded port, and whether the proxy serving is the version we
+    # have installed.
+    #
+    # A file that disagrees with reality is the failure mode this whole
+    # area keeps producing: a stopped daemon's port outliving it made
+    # `yamine start` bake :8443 into URLs while the machine served clean
+    # 443, and a root service left from an old gem keeps serving old code
+    # after an upgrade (`sudo yamine service install` re-registers it).
+    # Neither is visible from the URL bar, so both are named here.
+    def check_proxy_state(store, serving)
+      recorded = ProxyControl.proxy_port(store)
+      version = ProxyControl.proxy_version(store)
+      problems = []
+
+      if recorded && serving && recorded != serving
+        problems << "state says port #{recorded} but the proxy is on #{serving}" \
+          " — run: yamine proxy stop"
+      elsif recorded && serving.nil?
+        problems << "state says port #{recorded}, but no yamine proxy is serving" \
+          " — run: yamine proxy stop"
+      end
+
+      if version && version != Yamine::VERSION
+        problems << "the running proxy is v#{version}, this CLI is v#{Yamine::VERSION}" \
+          " — re-register it: sudo yamine service install"
+      end
+
+      if problems.empty?
+        Check.new(name: "proxy state", ok: true, message: "consistent")
+      else
+        Check.new(name: "proxy state", ok: true, warn: true,
+          message: problems.join("; "))
       end
     end
 

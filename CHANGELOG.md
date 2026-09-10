@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.9.0] — 2026-09-10
+
+### Fixed
+
+- **The service proxy now records its own state.** The launchd/systemd
+  service runs `proxy start --foreground`, and that path recorded
+  nothing: `write_pid` was reachable only from `spawn_daemon`. So after
+  `yamine setup`, the pid/port/scheme files still held the PREVIOUS
+  daemon's values. On a machine whose root service was serving clean
+  `https://<app>.localhost` on 443, the recorded port still said 8443 —
+  `yamine start` printed and baked `:8443` into `YAMINE_URL`, doctor
+  warned about the long-dead 8443, and `proxy stop` aimed at a pid that
+  was already gone. `setup` even contradicted itself in one run:
+  "proxy is up on port 443" followed by "listening on port 8443". The
+  foreground path now writes pid/port/tls plus a new `proxy.version`
+  marker BEFORE it serves.
+- The launchd plist and systemd unit pass `--port 443` explicitly. They
+  relied on the default, which consults `YAMINE_PORT` — one stray export
+  would silently move the boot service off 443.
+- **`proxy stop` no longer claims success on a root-owned proxy.** The
+  kill raised `Errno::EPERM`, which was swallowed by a blanket rescue:
+  the state files were cleared and "Proxy stopped." printed while the
+  service kept serving — now with nothing on disk to find or stop it by.
+  It reports `needs_root` and points at `sudo yamine service uninstall`.
+
+### Added
+
+- `doctor` gains a `proxy state` check and now finds the proxy that is
+  actually serving (`ProxyControl.serving_port`, ownership-proven)
+  instead of trusting the recorded port. It warns when the recorded port
+  disagrees with reality, and when the running proxy is an older gem
+  version than the CLI (the root service keeps serving old code after an
+  upgrade until `sudo yamine service install` re-registers it).
+- The clean default port wins when our proxy serves there, so a leftover
+  daemon on another port can no longer make the machine report a
+  downgraded URL as its state. A non-default port is still reported when
+  it is the only proxy — the deliberate CI/sandbox case.
+
+
 ## [0.8.2] — 2026-09-10
 
 ### Fixed

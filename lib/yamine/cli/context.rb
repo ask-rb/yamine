@@ -28,10 +28,7 @@ module Yamine
       # listening there. A dead proxy leaves the machine on the clean
       # default (443), and an explicit YAMINE_PORT always wins.
       def proxy_port
-        recorded = ProxyControl.proxy_port(store)
-        return recorded if recorded && ProxyControl.listening?(recorded)
-
-        ProxyControl.default_port(proxy_tls)
+        ProxyControl.active_port(store)
       end
 
       def proxy_tls

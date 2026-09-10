@@ -156,17 +156,33 @@ module Yamine
       nil
     end
 
-    def write_pid(store, pid, port, tls)
+    # Record this process as THE running proxy: pid, port, scheme, and the
+    # gem version serving it.
+    #
+    # Every reader trusts these files — doctor reports the port, Context
+    # and the supervisor build URLs from it, `proxy stop` signals the pid
+    # — so a proxy that serves without recording is worse than one that
+    # fails to start: it leaves the previous proxy's state on disk and the
+    # whole CLI acts on it. The launchd/systemd service used to take
+    # exactly that path (it runs `proxy start --foreground`, which
+    # recorded nothing), so a stopped 8443 daemon's port stayed on disk
+    # and `yamine start` baked :8443 into URLs while the machine served
+    # clean https://<app>.localhost on 443.
+    def write_proxy_state(store, pid:, port:, tls:)
       store.ensure_dir
+      version_path = File.join(store.dir, "proxy.version")
       File.write(store.pid_path, "#{pid}\n")
       File.write(store.port_path, "#{port}\n")
       File.write(File.join(store.dir, "proxy.tls"), tls ? "1" : "0")
-      Ownership.fix(store.pid_path, store.port_path, File.join(store.dir, "proxy.tls"))
+      File.write(version_path, "#{Yamine::VERSION}\n")
+      Ownership.fix(store.pid_path, store.port_path,
+        File.join(store.dir, "proxy.tls"), version_path)
     end
 
     def clear_pid(store)
       FileUtils.rm_f(store.pid_path)
       FileUtils.rm_f(store.port_path)
+      FileUtils.rm_f(File.join(store.dir, "proxy.version"))
     end
 
     def proxy_port(store)
@@ -175,6 +191,54 @@ module Yamine
       port = File.read(store.port_path).strip.to_i
       port.positive? ? port : nil
     rescue SystemCallError, ArgumentError
+      nil
+    end
+
+    # The gem version of the proxy that recorded its state, or nil when
+    # nothing is recorded. Compared against Yamine::VERSION so a service
+    # left behind by an older install is visible instead of silently
+    # serving stale code.
+    def proxy_version(store)
+      path = File.join(store.dir, "proxy.version")
+      return nil unless File.file?(path)
+
+      version = File.read(path).strip
+      version.empty? ? nil : version
+    rescue SystemCallError
+      nil
+    end
+
+    # Cheap resolution for the hot paths (URL building on every boot):
+    # the recorded port while something is listening there, else the
+    # scheme default. Proves liveness, not ownership — a foreign process
+    # on the recorded port still wins here and is then caught by
+    # `ensure_proxy!` ("port in use by another process"). Use
+    # `serving_port` when the answer must be OUR proxy.
+    def active_port(store)
+      recorded = proxy_port(store)
+      return recorded if recorded && listening?(recorded)
+
+      default_port(proxy_tls(store))
+    end
+
+    # Where OUR proxy is actually serving, or nil when it is not running.
+    # Proves ownership, so it costs a probe — doctor-only, where an
+    # occasional connection is free and a wrong answer is not.
+    #
+    # The default port wins when our proxy serves there, because that is
+    # the configuration yamine exists to produce: after `yamine setup`
+    # installs the 443 service, a leftover daemon on another port must not
+    # make doctor report the downgraded URL as the state of the machine.
+    # Only when the default has no proxy do we report the recorded port —
+    # which is the deliberate CI/sandbox case (`proxy start -p 1355`).
+    def serving_port(store)
+      tls = proxy_tls(store)
+      default = default_port(tls)
+      return default if ours?(default, tls: tls)
+
+      recorded = proxy_port(store)
+      return recorded if recorded && recorded != default && ours?(recorded, tls: tls)
+
       nil
     end
 
@@ -205,7 +269,7 @@ module Yamine
 
         sleep 0.25
       end
-      write_pid(store, pid, port, tls)
+      write_proxy_state(store, pid: pid, port: port, tls: tls)
       pid
     end
 
@@ -231,6 +295,11 @@ module Yamine
       end
       begin
         Process.kill("TERM", pid)
+      rescue Errno::EPERM
+        # The proxy runs as root (launchd/systemd service) and we do not.
+        # Clearing the state here would be a lie: the proxy keeps serving,
+        # now with nothing on disk to find or stop it by.
+        return :needs_root
       rescue SystemCallError
         clear_pid(store)
         return :stale
