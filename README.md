@@ -117,7 +117,8 @@ whole tree, and cleans up when one exits.
 
 Variants are file overlays: `config/local.<variant>.yml` deep-merges on
 top of `config/local.yml`, selected by `YAMINE_VARIANT` (Kamal's
-destination pattern).
+destination pattern). Naming a variant also prefixes the hostname — see
+below for how that differs from a worktree's automatic prefix.
 
 `.localhost` resolves to loopback natively in Chrome, Firefox, and Edge —
 no DNS server, no `/etc/resolver`. Safari may need `yamine hosts sync`.
@@ -135,10 +136,24 @@ no DNS server, no `/etc/resolver`. Safari may need `yamine hosts sync`.
 | variant | `fix-ui.myapp` | `--variant`, `YAMINE_VARIANT`, linked worktree branch |
 | tld | `myapp.preview.example.com` | `--tld` (default `localhost`) |
 
+`proxy.host` is the one exception: an explicitly written full hostname
+bypasses composition entirely, variant included.
+
 Linked git worktrees get a branch prefix automatically
-(`fix-ui.myapp.localhost`); the main checkout keeps the bare name.
-Pass `--branch` (or `YAMINE_BRANCH=1`) to prefix by current branch
-outside worktrees. `main`/`master`/detached HEAD never prefix.
+(`ui-onboarding.myapp.localhost`); the main checkout keeps the bare name,
+so a worktree and its main checkout run side by side. The label is the
+whole branch (`feature/login` → `feature-login.myapp.localhost`), so two
+branches that share a last segment never share a hostname. A detached
+HEAD has no branch to name it and falls back to the worktree's directory
+— the same identity its per-worktree database uses. `main`/`master`
+never prefix. Pass `--branch` (or `YAMINE_BRANCH=1`) to prefix by the
+current branch outside worktrees.
+
+A variant is a hostname label, not a config file. Only an explicit
+`--variant` / `YAMINE_VARIANT` goes looking for
+`config/local.<name>.yml` to merge; a worktree branch never does, so a
+branch named like a file on disk cannot change your config by accident.
+`yamine status` prints both lines so the two are never confused.
 
 ```bash
 yamine                                          # -> https://myapp.localhost
@@ -146,6 +161,11 @@ yamine --service api                            # -> https://api.myapp.localhost
 yamine --variant demo                           # -> https://demo.myapp.localhost
 yamine --tld preview.example.com                # your own domain (OAuth parity)
 ```
+
+Because a registered route answers `*.` subdomains of itself, any
+`<label>.myapp.localhost` reaches the main checkout until a worktree
+registers that exact name — at which point the exact route wins and the
+worktree takes over.
 
 ## Commands
 

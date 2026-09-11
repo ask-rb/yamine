@@ -78,15 +78,25 @@ yamine get backend --variant demo
 Use `get` output for frontend-to-API URLs, Cable URLs, and webhook
 targets. Do not guess ports.
 
-## Variants are files
+## Variants are files; worktrees are not
 
 A variant is a file overlay, Kamal-style: `config/local.<variant>.yml`
-deep-merges over `config/local.yml`. Select it with `YAMINE_VARIANT`
-or `--variant`. Worktrees get a branch prefix automatically.
+deep-merges over `config/local.yml`, selected with `YAMINE_VARIANT` or
+`--variant`. Naming one also prefixes the hostname.
+
+A git worktree needs none of that: it gets a branch prefix automatically
+(`ui-onboarding.myapp.localhost`) and boots alongside its main checkout,
+which keeps the bare name. The whole branch is the label, so
+`feature/login` and `bugfix/login` stay distinct. A detached worktree
+falls back to its directory name.
 
 ```bash
 YAMINE_VARIANT=fix-ui yamine    # boots with config/local.fix-ui.yml merged
 ```
+
+Only an explicit variant ever looks for an overlay file — a branch name
+that happens to match one on disk is ignored. `yamine status` shows
+`variant:` and `overlay:` separately.
 
 ## First time on a machine
 

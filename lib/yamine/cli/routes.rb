@@ -175,6 +175,9 @@ module Yamine
       # agent's cleanup). --force overrides and names the previous owner.
       def stop(ctx, args, out: $stdout)
         force = args.delete("--force")
+        # In a worktree this resolves that worktree's own hostname (the
+        # branch is the variant), so `stop` here never reaches across
+        # into the main checkout's running app.
         resolved = Resolver.resolve(Dir.pwd)
         hostnames = Resolver.hostnames(resolved)
         mine = Agent.name
@@ -261,9 +264,14 @@ module Yamine
       # `yamine` would boot here and why. Answers "why did I get
       # this URL" without booting anything. --json emits stable keys
       # for agents instead of prose.
-      def status(_ctx, args)
+      def status(ctx, args)
         json = args.delete("--json")
-        resolved = Resolver.resolve(Dir.pwd)
+        # The flags exist so `status --variant x` answers the same
+        # question boot would; in a worktree the branch supplies the
+        # variant anyway, so plain `status` is already the right answer.
+        opts = ctx.parse_flags(args, %i[variant tld branch])
+        resolved = Resolver.resolve(Dir.pwd, variant: opts[:variant], tld: opts[:tld],
+          use_branch: opts[:branch])
         hostnames = Resolver.hostnames(resolved)
         urls = hostnames.map do |h|
           Hostname.url(h, port: ProxyControl.default_port(true), tls: true)
@@ -273,6 +281,7 @@ module Yamine
           tld: resolved.tld, tld_source: resolved.sources[:tld],
           host: resolved.host, host_source: resolved.sources[:host],
           variant: resolved.variant, variant_source: resolved.sources[:variant],
+          overlay: resolved.overlay, overlay_source: resolved.sources[:overlay],
           urls: urls,
           processes: resolved.processes.keys,
           framework: Framework.detect(Dir.pwd).to_s
@@ -288,7 +297,11 @@ module Yamine
         else
           puts "tld:       #{payload[:tld]} (from #{payload[:tld_source]})"
         end
-        puts "variant:   #{payload[:variant] || "(none)"} (from #{payload[:variant_source] || "no overlay file, flag, or env"})"
+        puts "variant:   #{payload[:variant] || "(none)"} (from #{payload[:variant_source] || "no flag, env, or worktree branch"})"
+        # The overlay is a different thing from the variant and only an
+        # explicit --variant / YAMINE_VARIANT ever sets it, so say so
+        # rather than letting the two look like one setting.
+        puts "overlay:   #{payload[:overlay] ? "#{payload[:overlay]} (merged)" : "(none)"}"
         puts "processes: #{payload[:processes].join(", ")}"
         puts "urls:"
         urls.each { |u| puts "  #{u}" }

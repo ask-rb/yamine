@@ -51,12 +51,27 @@ module Yamine
       label.empty? ? nil : [label, source]
     end
 
+    # The whole branch, not just its last path segment. `feature/login`
+    # and `bugfix/login` are different worktrees and must not end up
+    # sharing a hostname; taking the last segment alone collapsed them
+    # both to `login`.
     def branch_to_prefix(branch)
       return nil if branch.nil? || branch.empty?
       return nil if branch == "HEAD" || DEFAULT_BRANCHES.include?(branch)
 
-      last = branch.split("/").last.to_s
-      label = Sanitize.hostname_label(last)
+      label = Sanitize.hostname_label(branch)
+      label.empty? ? nil : label
+    end
+
+    # A detached HEAD has no branch to name it, so the worktree's
+    # directory does — the same identity the per-worktree database is
+    # keyed on. Without this, a detached worktree would fall back to the
+    # bare app name and answer on the main checkout's hostname.
+    def worktree_dir_prefix(cwd)
+      top, status = git(cwd, "rev-parse", "--show-toplevel")
+      return nil unless status.success?
+
+      label = Sanitize.hostname_label(File.basename(top.strip))
       label.empty? ? nil : label
     end
 
@@ -81,7 +96,7 @@ module Yamine
       branch, s3 = git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
       return nil unless s3.success?
 
-      branch_to_prefix(branch.strip)
+      branch_to_prefix(branch.strip) || worktree_dir_prefix(cwd)
     rescue SystemCallError
       filesystem_worktree_prefix(cwd)
     end
@@ -98,8 +113,10 @@ module Yamine
           if match && match[1].match?(%r{[/\\]worktrees[/\\][^/\\]+\z})
             head = File.join(File.expand_path(match[1], dir.to_s), "HEAD")
             branch = read_branch_from_head(head)
-            prefix = branch_to_prefix(branch.to_s)
-            return prefix ? [prefix, "git worktree"].first : nil
+            # Same rule as the git path: branch when there is one, the
+            # worktree directory otherwise (detached HEAD).
+            prefix = branch_to_prefix(branch.to_s) || Sanitize.hostname_label(dir.basename.to_s)
+            return prefix.empty? ? nil : prefix
           end
           return nil
         end

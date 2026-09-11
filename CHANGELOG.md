@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.12.0] — 2026-09-11
+
+### Fixed
+
+- **Worktrees get their own URL, as the README always claimed.**
+  `Variant.resolve`, the worktree detector, `Hostname.compose`'s variant
+  axis and their unit tests were all present, correct, and never
+  assembled: `Resolver.resolve` never called `Variant.resolve`, and
+  `hostname_for` built `{service}.{app}.{tld}` by hand, bypassing the
+  composer. So every worktree of a project answered on the *same*
+  hostname as its main checkout, and the ownership gate refused to boot
+  the second one — while telling the user to "work in your own worktree
+  (each branch gets its own URL)", advice that could not work.
+
+  A linked worktree is now reachable at `<branch>.<app>.<tld>`
+  (`work/next` → `work-next.myapp.localhost`) and boots beside its main
+  checkout, which keeps the bare name. Cross-checked by serving two
+  branches at once: distinct ports, distinct asset digests, no shared
+  route.
+
+  Found while trying to run a second checkout of a Rails app for UI work,
+  which is exactly the case the feature existed for.
+
+### Changed
+
+- **The variant axis is split in two: `overlay` and `variant`.** They
+  were one setting, which meant that as soon as a worktree supplied its
+  own variant, `config/local.<branch>.yml` became an implied file lookup
+  — so a branch named like a file on disk would silently change the
+  config. Now only an explicit `--variant` / `YAMINE_VARIANT` sets the
+  overlay to merge; a worktree branch supplies the hostname label and
+  nothing else. `status` prints both lines, so the two can no longer be
+  mistaken for each other.
+
+- **A branch label is the whole branch, not its last path segment.**
+  `feature/login` and `bugfix/login` are different worktrees and used to
+  collapse to the same `login` hostname. Overlong branches still resolve
+  through the existing hash-suffix truncation.
+
+- A worktree on a detached HEAD falls back to its directory name (the
+  same identity the per-worktree database uses) instead of returning no
+  prefix and quietly colliding with the main checkout.
+
+- `yamine status` now honors `--variant` / `--tld`, and accepts
+  `--branch`, which the README documented but `parse_flags` rejected as
+  an unknown flag.
+
+- `proxy.host` is never rewritten by a variant: an explicitly written
+  hostname is left exactly as written.
+
 ## [0.11.1] — 2026-09-11
 
 ### Fixed

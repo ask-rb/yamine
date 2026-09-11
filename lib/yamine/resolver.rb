@@ -9,10 +9,26 @@ module Yamine
     module_function
 
     Result = Struct.new(:app, :tld, :host, :processes, :secrets,
-      :sources, :variant, :db, :env, keyword_init: true)
+      :sources, :variant, :overlay, :db, :env, keyword_init: true)
 
-    def resolve(dir = Dir.pwd, variant: nil, tld: nil, host: nil)
-      config = Config.load(dir, variant: variant)
+    # Two axes, and keeping them apart is the whole point:
+    #
+    #   overlay — an explicit `config/local.<name>.yml` to deep-merge.
+    #             Only --variant / YAMINE_VARIANT ever set it, so a
+    #             branch name can never select config by surprise.
+    #   variant — the leading hostname label, from that same explicit
+    #             name OR a linked worktree's branch. It is a name, not
+    #             a file: a worktree is reachable at
+    #             <branch>.<app>.localhost without inventing config.
+    #
+    # They share a value when the user asks for one explicitly. Only
+    # then does a variant mean both "merge this file" and "prefix this
+    # hostname", which is the documented `--variant` behavior.
+    def resolve(dir = Dir.pwd, variant: nil, tld: nil, host: nil, use_branch: false)
+      overlay = (variant || ENV["YAMINE_VARIANT"])&.strip
+      overlay = nil if overlay&.empty?
+
+      config = Config.load(dir, variant: overlay)
       unless config
         raise ConfigError, Config.missing_message(dir)
       end
@@ -21,8 +37,7 @@ module Yamine
       proxy = config.proxy_config
       processes = config.processes
 
-      variant_name = (variant || ENV["YAMINE_VARIANT"])&.strip
-      variant_name = nil if variant_name&.empty?
+      variant_name, variant_source = Variant.resolve(dir, explicit: variant, use_branch: use_branch)
 
       # host or tld: config proxy.host wins over proxy.tld; flags override.
       if host || proxy["host"]
@@ -41,7 +56,8 @@ module Yamine
         app: config.path.to_s,
         tld: proxy["tld"] ? "#{config.path} proxy.tld" : "default (localhost)",
         host: proxy["host"] ? "#{config.path} proxy.host" : nil,
-        variant: variant_name ? "config/local.#{variant_name}.yml" : nil
+        variant: variant_source,
+        overlay: overlay ? "config/local.#{overlay}.yml" : nil
       }
 
       Result.new(
@@ -52,20 +68,33 @@ module Yamine
         secrets: config.secrets,
         sources: sources,
         variant: variant_name,
+        overlay: overlay,
         db: config.data["db"],
         env: config.env_config
       )
     end
 
     # Hostname for one process: primary (first proxy:true) is bare;
-    # others are proc.app.tld; proxy:false have none.
+    # others are proc.app.tld; proxy:false have none. A variant — the
+    # explicit name or a worktree's branch — leads every one of them.
     def hostname_for(result, proc_name)
       entry = result.processes[proc_name]
       return nil unless entry
       return nil if entry["proxy"] == false
 
-      base = result.host ? result.host : "#{result.app}.#{result.tld}"
-      proc_name.to_s == primary_proc(result) ? base : "#{proc_name}.#{base}"
+      # An explicit proxy.host is a full hostname, so composition does
+      # not apply — and a variant must never silently rewrite a host
+      # the user wrote out in full.
+      if result.host
+        return proc_name.to_s == primary_proc(result) ? result.host : "#{proc_name}.#{result.host}"
+      end
+
+      Hostname.compose(
+        app: result.app,
+        tld: result.tld,
+        service: (proc_name.to_s == primary_proc(result) ? nil : proc_name.to_s),
+        variant: result.variant
+      )
     end
 
     def primary_proc(result)

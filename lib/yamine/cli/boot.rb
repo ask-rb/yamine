@@ -16,8 +16,9 @@ module Yamine
       # boots every process, supervises the tree, cleans up on exit.
       def run_inferred(ctx, args)
         variant = ENV["YAMINE_VARIANT"]
-        opts = ctx.parse_flags(args, %i[variant tld force app_port wait no_wait json])
-        resolved = resolve!(ctx, variant: opts[:variant] || variant, tld: opts[:tld])
+        opts = ctx.parse_flags(args, %i[variant tld force app_port wait no_wait json branch])
+        resolved = resolve!(ctx, variant: opts[:variant] || variant, tld: opts[:tld],
+          use_branch: opts[:branch])
         # Ownership gate before any side effects: no proxy spawn, no
         # port allocation when we'd refuse anyway.
         check_worktree_ownership!(ctx, resolved, force: opts[:force])
@@ -653,10 +654,10 @@ module Yamine
         end
       end
 
-      def resolve!(ctx, variant: nil, tld: nil)
+      def resolve!(ctx, variant: nil, tld: nil, use_branch: false)
         # The resolver calls Config.load, which raises ConfigError if
         # config/local.yml is missing — exactly what we want.
-        Yamine::Resolver.resolve(Dir.pwd, variant: variant, tld: tld)
+        Yamine::Resolver.resolve(Dir.pwd, variant: variant, tld: tld, use_branch: use_branch)
       end
 
       # json: keeps stdout free for the machine-readable stream — this runs
