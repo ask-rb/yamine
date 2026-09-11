@@ -155,8 +155,26 @@ module Yamine
       env = { "YAMINE_URL" => url }
       env["PORT"] = port.to_s if port
       env["HOST"] = "127.0.0.1"
-      ca = File.join(Certs.state_dir, "ca.pem")
-      env["NODE_EXTRA_CA_CERTS"] = ca if File.file?(ca)
+
+      # TLS: yamine's names present certificates signed by its own CA, so
+      # every process that talks to one of them has to be told to trust it.
+      # Three clients, three conventions — and getting this wrong is not
+      # subtle. A Ruby app calling https://other-app.localhost fails with
+      # "certificate verify failed", which reads as a broken app rather
+      # than a missing trust setting:
+      #
+      #   * Ruby/OpenSSL, curl, and git honor SSL_CERT_FILE — but it
+      #     *replaces* the store, so it points at the bundle (the system's
+      #     roots plus our CA), never at our CA alone; a CA-only file would
+      #     break every public HTTPS call the app makes.
+      #   * git takes GIT_SSL_CAINFO as its own override.
+      #   * Node ignores both and reads NODE_EXTRA_CA_CERTS, which is
+      #     additive — the CA by itself is right there.
+      bundle = Certs.ensure_bundle
+      env["NODE_EXTRA_CA_CERTS"] = Certs.ca_cert_path
+      env["SSL_CERT_FILE"] = bundle
+      env["GIT_SSL_CAINFO"] = bundle
+
       # Rails blocks unknown Host headers in development. Allow the
       # proxied hostname so Rails apps boot behind yamine with zero
       # config — this replaces the yamine-rails hosts patch.

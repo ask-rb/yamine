@@ -33,6 +33,7 @@ module Yamine
       checks << check_routes(store)
       checks << check_dns(store)
       checks << check_ca
+      checks << check_ca_bundle
       checks
     end
 
@@ -193,6 +194,22 @@ module Yamine
       else
         Check.new(name: "ca", ok: true, message: "CA trusted")
       end
+    end
+
+    # The child-process trust bundle. Its absence is not theoretical: an
+    # app whose process was started before the bundle existed (or with a
+    # regenerated CA) fails every call to another *.localhost with
+    # "certificate verify failed". Regenerating it here is safe and is
+    # exactly what the next boot would do anyway.
+    def check_ca_bundle
+      dir = Certs.state_dir
+      return Check.new(name: "bundle", ok: false, message: "no CA yet — run: yamine trust") unless File.file?(Certs.ca_paths(dir)[:cert])
+
+      target = Certs.ensure_bundle(dir)
+      count = File.read(target).scan("BEGIN CERTIFICATE").size
+      Check.new(name: "bundle", ok: true, message: "#{count} certificates (system roots + yamine CA)")
+    rescue StandardError => e
+      Check.new(name: "bundle", ok: false, message: "could not build #{Certs.bundle_path(dir)}: #{e.message}")
     end
 
     # How many trusted certificates carry one of our CA names without

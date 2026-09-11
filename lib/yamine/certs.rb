@@ -44,6 +44,12 @@ module Yamine
       { cert: File.join(dir, "ca.pem"), key: File.join(dir, "ca-key.pem") }
     end
 
+    # The CA certificate's path on disk. Generated on first ask.
+    def ca_cert_path(dir = state_dir)
+      ensure_ca(dir)
+      ca_paths(dir)[:cert]
+    end
+
     def ensure_ca(dir = state_dir)
       FileUtils.mkdir_p(dir, mode: 0o755)
       Ownership.fix(dir)
@@ -77,6 +83,68 @@ module Yamine
       paths = ensure_ca(dir)
       [OpenSSL::X509::Certificate.new(File.read(paths[:cert])),
        OpenSSL::PKey.read(File.read(paths[:key]))]
+    end
+
+    # A CA bundle a child process can verify against: the system roots
+    # *plus* this CA.
+    #
+    # Why a bundle and not just the CA: `SSL_CERT_FILE` (Ruby/OpenSSL,
+    # curl, git) *replaces* the default store rather than adding to it, so
+    # pointing it at a file containing only our CA makes every public
+    # HTTPS request in that process fail verification. Concatenating gives
+    # both — yamine's names verify and rubygems, APIs, and git-over-https
+    # keep working.
+    #
+    # Built fresh when the CA or the system store changes, and cached
+    # otherwise: the bundle is ~230 KB and regenerating it on every boot
+    # would be pure waste, while serving a stale one after `yamine trust`
+    # regenerates the CA would silently break every TLS connection in the
+    # app.
+    def bundle_path(dir = state_dir)
+      File.join(dir, "bundle.pem")
+    end
+
+    # The system's own roots, in the order OpenSSL would consider them.
+    # SSL_CERT_FILE wins when set (that is the variable we are about to
+    # write, and a caller may have pointed it somewhere deliberately),
+    # else OpenSSL's compiled-in file, else the usual macOS/Linux paths.
+    def system_bundle
+      candidates = [ENV["SSL_CERT_FILE"],
+        OpenSSL::X509::DEFAULT_CERT_FILE,
+        "/etc/ssl/cert.pem",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/certs/ca-certificates.crt"].compact
+      candidates.find { |path| File.file?(path) && File.size(path).positive? }
+    end
+
+    def ensure_bundle(dir = state_dir)
+      paths = ensure_ca(dir)
+      target = bundle_path(dir)
+      ca = File.read(paths[:cert])
+      system_file = system_bundle
+      # Regenerate when the CA changed, when the system store changed, or
+      # when the bundle is missing. mtime comparison is enough: these files
+      # are written by installers, not edited in place.
+      return target if bundle_current?(target, paths[:cert], system_file)
+
+      FileUtils.mkdir_p(dir)
+      content = +""
+      content << File.read(system_file) if system_file
+      content << "\n" unless content.empty? || content.end_with?("\n")
+      content << ca
+      File.write(target, content, mode: "w", perm: 0o644)
+      Ownership.fix(target)
+      target
+    end
+
+    def bundle_current?(target, ca_path, system_file)
+      return false unless File.file?(target)
+
+      target_mtime = File.mtime(target)
+      return false if File.mtime(ca_path) > target_mtime
+      return false if system_file && File.mtime(system_file) > target_mtime
+
+      true
     end
 
     # Mint a leaf cert for one hostname, signed by the CA.

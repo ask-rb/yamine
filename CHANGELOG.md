@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.11.0] — 2026-09-11
+
+### Added
+
+- **Ruby, git, and curl now trust the local CA — so an app can call
+  another app at `https://<name>.localhost` with no configuration.** The
+  gap surfaced when anywaye (a Rails app) tried to reach anymark at
+  `https://anymark-directory.localhost`: `certificate verify failed`. The
+  CA was trusted everywhere a human looks (Safari, Chrome, curl) and
+  nowhere a child process looks — only Node was covered, via
+  `NODE_EXTRA_CA_CERTS`.
+
+  The naive fix is wrong in a way that shows up much later. `SSL_CERT_FILE`
+  does not *add* to OpenSSL's roots, it *replaces* them, so pointing it at
+  `~/.yamine/ca.pem` would break every public HTTPS call the app makes —
+  rubygems, payment APIs, an LLM provider — while fixing the local one. So
+  yamine now builds `~/.yamine/bundle.pem`: the system's roots plus its own
+  CA, regenerated only when either changes, and exports it as
+  `SSL_CERT_FILE` and `GIT_SSL_CAINFO` for every child. Node keeps getting
+  the CA alone, because its variable really is additive.
+
+  `yamine doctor` reports the bundle (`bundle: 129 certificates`), so a
+  missing or stale one is visible before an app fails on it, and a real
+  TLS handshake against a yamine-minted certificate is pinned by a test —
+  not just the presence of the environment variables.
+
 ## [0.10.4] — 2026-09-11
 
 ### Fixed
