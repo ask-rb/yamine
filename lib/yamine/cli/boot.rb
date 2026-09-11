@@ -90,6 +90,28 @@ module Yamine
           exit 1
         end
 
+        # Pre-flight: a live tmp/pids/server.pid makes Rails refuse to
+        # boot ("A server is already running") the moment web starts.
+        # When the holder is this app's own puma (`puma ... [app]`), take
+        # over automatically — that is one of ours. Anything else is not
+        # ours to kill: fail with the exact fix before spawning.
+        conflict_ok, conflict_detail, conflict_pid = Readiness.server_pid_conflict(Dir.pwd)
+        unless conflict_ok
+          if own_orphan_puma?(conflict_pid, resolved.app, Dir.pwd)
+            say opts, "  reaping own orphaned server (pid #{conflict_pid})"
+            reap_stale_server(conflict_pid)
+          elsif opts[:force]
+            say opts, "  --force: taking over pid #{conflict_pid}"
+            reap_stale_server(conflict_pid)
+          else
+            $stderr.puts "Error: #{conflict_detail}."
+            $stderr.puts "  Rails will refuse to boot while it runs. Free it first:"
+            $stderr.puts "    kill #{conflict_pid} && rm tmp/pids/server.pid"
+            $stderr.puts "  Or re-run with --force to let yamine take over that pid."
+            exit 1
+          end
+        end
+
         runner = Runner.new(store: ctx.store)
         children = []
         routes_registered = []
@@ -111,12 +133,21 @@ module Yamine
         with_wait = !opts[:no_wait]
         spawn_plan = collect_spawns(ctx, runner, resolved, opts, db_url, children)
 
-        if with_wait
-          boot_concurrent(ctx, runner, resolved, opts, spawn_plan, children,
-            routes_registered, db_url, db_name, db_created, events: events)
-        else
-          boot_sequential(ctx, runner, resolved, opts, spawn_plan, children,
-            routes_registered, db_url, events: events)
+        begin
+          if with_wait
+            boot_concurrent(ctx, runner, resolved, opts, spawn_plan, children,
+              routes_registered, db_url, db_name, db_created, events: events)
+          else
+            boot_sequential(ctx, runner, resolved, opts, spawn_plan, children,
+              routes_registered, db_url, events: events)
+          end
+        rescue StandardError
+          # A raise mid-boot (route conflict, quota, unexpected error)
+          # must never leave half a tree running: reap every child and
+          # every route already registered, then surface the error.
+          children.each { |c| stop_spawned_pid(c[:pid]) }
+          cleanup_routes(ctx, routes_registered.flat_map { |r| r[:hostnames] })
+          raise
         end
 
         background = processes.select { |_, v| v["proxy"] == false }
@@ -135,6 +166,35 @@ module Yamine
         all_hostnames = routes_registered.flat_map { |r| r[:hostnames] }
         trap_cleanup(ctx, all_hostnames, named_pids.keys)
         supervise_tree(ctx, all_hostnames, named_pids, reporter: events)
+      end
+
+      # TERM the old server and make sure the pidfile no longer names
+      # a live process before we spawn (wait a moment; then remove the
+      # file if the process is still refusing to die, so Rails can boot
+      # over it — the socket it held is already ours to take).
+      def reap_stale_server(pid)
+        Process.kill("TERM", pid)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+        while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+          break unless ProxyControl.pid_alive?(pid)
+          sleep 0.2
+        end
+        FileUtils.rm_f(File.join(Dir.pwd, "tmp", "pids", "server.pid"))
+      rescue SystemCallError
+        FileUtils.rm_f(File.join(Dir.pwd, "tmp", "pids", "server.pid"))
+      end
+
+      # Is this pid a leftover backend of THIS app? `puma (tcp://...)
+      # [app]` names the app; we also accept a command containing the
+      # app dir. Only then may we reap it unasked.
+      def own_orphan_puma?(pid, app, dir)
+        _out, status = Open3.capture2("ps", "-p", pid.to_s, "-o", "command=")
+        return false unless status.success?
+
+        cmd = _out.to_s
+        cmd.include?("[#{app}]") || cmd.include?(File.expand_path(dir))
+      rescue SystemCallError
+        false
       end
 
       # One pass over config: background processes spawn immediately
@@ -198,12 +258,18 @@ module Yamine
         apps = {}
         plan.each do |item|
           say opts, "  [#{item[:name]}] #{item[:url]}"
+          app = runner.spawn_http(name: item[:name], hostname: item[:hostname],
+            url: item[:url], dir: Dir.pwd, command: item[:command],
+            port: item[:port], rails_dev_host: item[:hostname],
+            database_url: db_url, force: opts[:force])
+          # Tracked before registration so any later failure (a raise
+          # during adopt, a crash while another process waits) can
+          # always reap it. Duplicate names in named_pids are harmless.
+          children << { name: item[:name], pid: app.pid }
           apps[item[:name]] = {
             item: item,
-            app: runner.spawn_http(name: item[:name], hostname: item[:hostname],
-              url: item[:url], dir: Dir.pwd, command: item[:command],
-              port: item[:port], rails_dev_host: item[:hostname],
-              database_url: db_url, force: opts[:force])
+            log_path: File.join(Dir.pwd, "log", "yamine-#{item[:name]}.log"),
+            app: app
           }
         end
         wait_result = Readiness.wait_all(apps, sink: events)

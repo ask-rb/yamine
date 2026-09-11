@@ -168,8 +168,7 @@ module Yamine
       until Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
         unless process_alive?(app.pid)
           ms = elapsed_ms(started)
-          return fail_result(name, started, ms,
-            "process exited before becoming healthy — see log/yamine-#{name}.log", sink)
+          return fail_result(name, started, ms, died_detail(name, slot), sink)
         end
         ok, detail = probe(item[:hostname], item[:port], path: path)
         if ok
@@ -182,11 +181,22 @@ module Yamine
       ms = elapsed_ms(started)
       status = process_alive?(app.pid) ? "timeout" : "fail"
       detail = process_alive?(app.pid) ? "no healthy response within #{timeout}s (#{last_error})" :
-        "process exited before becoming healthy — see log/yamine-#{name}.log"
+        died_detail(name, slot)
       event = Event.new(phase: "process", action: name, status: status,
         duration_ms: ms, detail: detail)
       sink&.event(event)
       { name: name, status: status, phase: "process", detail: detail, duration_ms: ms }
+    end
+
+    # Why a process that died before answering died: the recognized
+    # fatal line when there is one, else point at its log.
+    def died_detail(name, slot)
+      reason = fatal_line(slot[:log_path])
+      if reason
+        "process exited: #{reason} (log/yamine-#{name}.log)"
+      else
+        "process exited before becoming healthy — see log/yamine-#{name}.log"
+      end
     end
 
     def ok_result(name, started, ms, path, sink)
@@ -202,6 +212,53 @@ module Yamine
         duration_ms: ms, detail: detail)
       sink&.event(event)
       { name: name, status: "fail", phase: "process", detail: detail, duration_ms: ms }
+    end
+
+    # Rails refuses to boot when tmp/pids/server.pid names a live
+    # process ("A server is already running (pid: N)") — the classic
+    # interrupted-run leftover. Report the exact reason and the fix
+    # BEFORE spawning anything, instead of letting `web` die 2s later.
+    # Returns [ok, detail, pid]; ok is true when there is nothing in the
+    # way (no file, unreadable, or a dead pid — Rails overwrites those).
+    def server_pid_conflict(dir = Dir.pwd)
+      path = File.join(dir, "tmp", "pids", "server.pid")
+      return [true, nil, nil] unless File.file?(path)
+
+      pid = File.read(path).strip.to_i
+      return [true, nil, nil] unless pid.positive? && process_alive?(pid)
+
+      [false, "a Rails server is already running (pid #{pid}, from #{path})", pid]
+    rescue SystemCallError, ArgumentError
+      [true, nil, nil]
+    end
+
+    # Known fatal patterns in a dying backend's log. The log line that
+    # killed the process is more useful than "process exited" — agents
+    # should not have to open the file to learn why.
+    FATAL_PATTERNS = [
+      [/A server is already running \(pid:\s*(\d+)/i,
+        ->(m) { "another server is already running (pid #{m[1]}); stale tmp/pids/server.pid" }],
+      [/Address already in use/i,
+        ->(_m) { "address already in use; another process holds the port" }],
+      [/Bundler::GemNotFound|Could not find .* locally installed gems|run `?bundle install/i,
+        ->(_m) { "gems missing; run `bundle install`" }],
+      [/ActiveRecord::NoDatabaseError|PG::ConnectionBad|database .* does not exist/i,
+        ->(_m) { "database unreachable or missing; check DATABASE_URL / the database server" }]
+    ].freeze
+
+    def fatal_line(path)
+      return nil unless path && File.file?(path)
+
+      lines = File.readlines(path).last(80)
+      FATAL_PATTERNS.each do |pattern, describe|
+        match = lines.reverse.find { |l| l.match?(pattern) }
+        next unless match
+
+        return describe.call(match.match(pattern))
+      end
+      nil
+    rescue SystemCallError
+      nil
     end
 
     def process_alive?(pid)

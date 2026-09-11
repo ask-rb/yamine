@@ -103,10 +103,17 @@ module Yamine
       Process.detach(pid)
       target = "127.0.0.1:#{port}"
       if register
-        spec ||= { "dir" => File.expand_path(dir), "proc" => name }
-        @store.add_route(hostname, target, Process.pid, kind: "tcp",
-          force: force, spec: spec)
-        write_backend_pid(hostname, pid)
+        begin
+          spec ||= { "dir" => File.expand_path(dir), "proc" => name }
+          @store.add_route(hostname, target, Process.pid, kind: "tcp",
+            force: force, spec: spec)
+          write_backend_pid(hostname, pid)
+        rescue StandardError
+          # Registration refused (quota, conflict): the backend is
+          # already spawned — never leave it running without a route.
+          stop_pid(pid)
+          raise
+        end
       end
       App.new(name: name, hostname: hostname, url: url, pid: pid,
         target: target, kind: "tcp", command: command)

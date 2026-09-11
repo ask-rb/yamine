@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.10.4] — 2026-09-11
+
+### Fixed
+
+- **A stale `tmp/pids/server.pid` no longer kills the boot 2s in.** The
+  anywaye incident: an interrupted earlier run left puma alive, Rails
+  refused to start ("A server is already running (pid: N)"), `web` died
+  before its first healthcheck, and the failure line only said "process
+  exited" — the actual reason sat in the log file. Now:
+  - Pre-flight `Readiness.server_pid_conflict` checks the pidfile BEFORE
+    spawning. A live holder is a conflict, not a mystery crash; a dead
+    pid is fine (Rails overwrites it).
+  - When the holder is this app's own leftover puma (`puma ... [app]`),
+    yamine reaps it automatically. Anything else fails with the exact
+    fix (`kill N && rm tmp/pids/server.pid`), or `--force` to take over.
+  - `Readiness.fatal_line` recognizes the common killers (already
+    running, address in use, missing gems, missing database) in the
+    process's own log and puts the real reason in the failure line.
+- **No more orphans on any failure path.** The incident left puma +
+  solid-queue + ask-app-server running for 24 minutes with no routes
+  after the CLI exited. Now `Runner#boot_run` reaps the backend when
+  registration is refused (quota/conflict), `boot_concurrent` tracks
+  every spawned HTTP backend in `children` before adopt, and `boot_all`
+  wraps spawn+boot so a raise mid-boot kills every child and removes
+  every route already registered. Tests pin all three (with `expects`
+  so they cannot pass vacuously).
+
 ## [0.10.3] — 2026-09-11
 
 ### Added

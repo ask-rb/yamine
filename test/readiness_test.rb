@@ -263,3 +263,93 @@ class WaitPayloadTest < Minitest::Test
     assert_equal "last lines\n", payload[:log_tail]
   end
 end
+
+class FatalLineTest < Minitest::Test
+  def log_with(content)
+    tmp = Tempfile.new(["fatal-", ".log"])
+    tmp.write(content)
+    tmp.close
+    tmp
+  end
+
+  def test_recognizes_already_running_pid
+    tmp = log_with("=> Booting Puma\nA server is already running (pid: 28378, file: tmp/pids/server.pid).\nExiting\n")
+    detail = Yamine::Readiness.fatal_line(tmp.path)
+    assert_match(/another server is already running \(pid 28378\)/, detail)
+    assert_match(/stale tmp\/pids\/server\.pid/, detail)
+  end
+
+  def test_recognizes_address_in_use
+    tmp = log_with("Errno::EADDRINUSE: Address already in use - bind(2) for 127.0.0.1:4563\n")
+    assert_match(/address already in use/, Yamine::Readiness.fatal_line(tmp.path))
+  end
+
+  def test_recognizes_missing_gems
+    tmp = log_with("Bundler::GemNotFound: Could not find rack-3.2.1 in locally installed gems\n")
+    assert_match(/gems missing/, Yamine::Readiness.fatal_line(tmp.path))
+  end
+
+  def test_recognizes_missing_database
+    tmp = log_with("ActiveRecord::NoDatabaseError: We could not find your database: anywaye_development\n")
+    assert_match(/database unreachable or missing/, Yamine::Readiness.fatal_line(tmp.path))
+  end
+
+  def test_returns_nil_for_ordinary_log
+    tmp = log_with("=> Booting Puma\n=> Rails 8.1.3 application starting in development\n")
+    assert_nil Yamine::Readiness.fatal_line(tmp.path)
+  end
+
+  def test_returns_nil_for_missing_file
+    assert_nil Yamine::Readiness.fatal_line("/nonexistent/yamine-web.log")
+    assert_nil Yamine::Readiness.fatal_line(nil)
+  end
+
+  def test_latest_fatal_wins
+    tmp = log_with("A server is already running (pid: 1, file: x).\n...\nA server is already running (pid: 2, file: x).\n")
+    assert_match(/pid 2/, Yamine::Readiness.fatal_line(tmp.path))
+  end
+end
+
+class ServerPidConflictTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    FileUtils.mkdir_p(File.join(@dir, "tmp", "pids"))
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir) if @dir
+  end
+
+  def write_pid(content)
+    File.write(File.join(@dir, "tmp", "pids", "server.pid"), content)
+  end
+
+  def test_no_file_is_no_conflict
+    ok, detail, pid = Yamine::Readiness.server_pid_conflict(@dir)
+    assert ok
+    assert_nil detail
+    assert_nil pid
+  end
+
+  def test_dead_pid_is_no_conflict
+    dead = fork { exit 0 }
+    Process.wait(dead)
+    write_pid(dead.to_s)
+    ok, _detail, _pid = Yamine::Readiness.server_pid_conflict(@dir)
+    assert ok, "a stale (dead) pidfile must not block boot — Rails overwrites it"
+  end
+
+  def test_live_pid_is_conflict
+    write_pid(Process.pid.to_s)
+    ok, detail, pid = Yamine::Readiness.server_pid_conflict(@dir)
+    refute ok
+    assert_equal Process.pid, pid
+    assert_match(/already running \(pid #{Process.pid}/, detail)
+  end
+
+  def test_garbage_pidfile_is_no_conflict
+    write_pid("not-a-pid\n")
+    ok, _detail, _pid = Yamine::Readiness.server_pid_conflict(@dir)
+    assert ok
+  end
+end

@@ -164,3 +164,102 @@ class BootWaitTest < Minitest::Test
     Process.kill("TERM", app.pid) rescue nil if app
   end
 end
+
+# Orphan safety: any failure after a backend is spawned must reap it.
+# The anywaye incident: an exception mid-boot left puma + jobs + host
+# running for 24 minutes with no routes.
+class BootOrphanSafetyTest < Minitest::Test
+  def setup
+    @orig_dir = Dir.pwd
+    @dir = Dir.mktmpdir
+    @state = Dir.mktmpdir
+    @orig_state = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = @state
+    Dir.chdir(@dir)
+    FileUtils.mkdir_p(File.join(@dir, "config"))
+    @marker = File.join(@dir, "unique-backend-marker.rb")
+    File.write(@marker, <<~RUBY)
+      require "socket"
+      s = TCPServer.new("127.0.0.1", ENV["PORT"].to_i)
+      loop { c = s.accept; c.write("ok") rescue nil; c.close rescue nil }
+    RUBY
+    @pids = []
+  end
+
+  def teardown
+    Dir.chdir(@orig_dir)
+    ENV["YAMINE_STATE_DIR"] = @orig_state
+    @pids.each { |pid| Process.kill("KILL", pid) rescue nil }
+    FileUtils.remove_entry(@dir) rescue nil
+    FileUtils.remove_entry(@state) rescue nil
+  end
+
+  def write_config(content)
+    File.write(File.join(@dir, "config", "local.yml"), content)
+  end
+
+  def marker_processes
+    out = `pgrep -f unique-backend-marker 2>/dev/null`.split("\n").map(&:to_i)
+    out.reject { |pid| pid == Process.pid }
+  end
+
+  # boot_run must not leave the backend alive when registration is
+  # refused (quota, route conflict) — the App is spawned first, so the
+  # failure path owns the cleanup.
+  def test_boot_run_reaps_backend_when_registration_refused
+    store = Yamine::RouteStore.new(@state)
+    runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
+    port = Yamine::Ports.find_free
+    # once: proves the spawn+register path was actually reached before
+    # the refusal — otherwise the assertion is vacuous.
+    store.expects(:add_route).once.raises(
+      Yamine::QuotaExceededError.new("agent", 1, 1))
+
+    assert_raises(Yamine::QuotaExceededError) do
+      runner.boot_run(name: "web", hostname: "x.localhost",
+        url: "https://x.localhost", dir: @dir,
+        command: ["sh", "-c", "ruby #{@marker}"], port: port)
+    end
+    sleep 0.5
+    assert_empty marker_processes,
+      "a backend whose registration was refused must be reaped"
+  end
+
+  # A raise mid-boot (route conflict from adopt, unexpected error) must
+  # kill every child and remove every route already registered.
+  def test_boot_all_reaps_children_and_routes_on_mid_boot_raise
+    write_config(<<~YAML)
+      service: orphan-safety
+      db: false
+      processes:
+        web:
+          cmd: ruby #{@marker}
+          proxy: true
+    YAML
+    ctx = Yamine::CLI::Context.new
+    resolved = Yamine::Resolver.resolve(@dir)
+    # once: proves boot reached adopt (i.e. the backend was spawned and
+    # answered its TCP probe) before the raise — not an early exit.
+    ctx.store.expects(:add_route).at_least_once.raises(
+      Yamine::RouteConflictError.new("orphan-safety.localhost", 999,
+        existing_agent: "other@host", existing_dir: "/elsewhere"))
+
+    capture_io do
+      assert_raises(Yamine::RouteConflictError) do
+        Yamine::CLI::BootCommand.boot_all(ctx, resolved, {})
+      end
+    end
+    sleep 0.5
+    assert_empty marker_processes,
+      "a raise after spawn must not orphan the backend"
+    assert_empty ctx.store.load_routes_raw,
+      "a raise after registration must not leave routes behind"
+  end
+
+  # The own-orphan check is conservative: only puma naming this app (or
+  # a command containing this dir) may be reaped unasked.
+  def test_own_orphan_puma_detection
+    # Our own ruby test process: no [app] tag, no dir match -> false.
+    refute Yamine::CLI::BootCommand.send(:own_orphan_puma?, Process.pid, "myapp", "/tmp/nope")
+  end
+end
