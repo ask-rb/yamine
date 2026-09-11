@@ -89,43 +89,107 @@ class HostsTest < Minitest::Test
   end
 end
 
-# resolves? backs the "will not resolve — run yamine hosts sync" warning
-# and doctor's dns check. It must ask the SYSTEM resolver, because that
-# is what browsers and curl use. Ruby's Resolv is a pure-Ruby DNS client
-# with no nsswitch and no RFC 6761 knowledge, so it reports .localhost as
-# unresolvable on machines where it resolves perfectly — sending users to
-# an elevated /etc/hosts write they never needed.
-class HostsResolvesTest < Minitest::Test
-  def test_localhost_resolves
-    assert Yamine::Hosts.resolves?("localhost"),
-      "localhost must resolve (RFC 6761 special-use, handled by getaddrinfo)"
+# classification/resolution back doctor's dns check and boot's DNS
+# warning. The oracle is the hosts FILE, not a resolver probe: it is the
+# one source every client shares. getaddrinfo is consulted only for
+# custom-TLD names the file does not answer, and never for .localhost —
+# on macOS the system resolver answers any .localhost unconditionally,
+# so probing it reported every .localhost route as fully resolved while
+# a CGO-disabled Go binary (file-only resolver) could not see any of
+# them. That false "resolves" is the bug this class guards against
+# returning.
+class HostsResolutionTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @path = File.join(@dir, "hosts")
   end
 
-  def test_loopback_ip_resolves
-    assert Yamine::Hosts.resolves?("127.0.0.1")
+  def teardown
+    FileUtils.remove_entry(@dir)
   end
 
-  def test_nonexistent_tld_does_not_resolve
-    refute Yamine::Hosts.resolves?("this-host-does-not-exist.invalid")
+  def write_hosts(content)
+    File.write(@path, content)
   end
 
-  def test_unresolved_reports_only_the_missing
-    missing = Yamine::Hosts.unresolved(["localhost", "nope.invalid"])
+  def test_entry_in_the_managed_block_counts
+    write_hosts("# --- yamine begin ---\n127.0.0.1 myapp.localhost\n# --- yamine end ---\n")
 
-    assert_equal ["nope.invalid"], missing
+    assert Yamine::Hosts.hosts_entry?("myapp.localhost", @path)
   end
 
-  # The bug this guards: `.localhost` resolved by getaddrinfo but NOT by
-  # Resolv on macOS. Assert the fix is the system path by pinning that
-  # Resolv would disagree — if Resolv ever agrees here the test is moot,
-  # but the assertion above still holds the line.
-  def test_uses_system_resolver_not_pure_ruby_dns
-    resolved = begin
-      Addrinfo.getaddrinfo("localhost", nil)
-    rescue SocketError
-      nil
-    end
+  # A hand-added entry resolves the name for file-only clients just as
+  # well as a synced one; the check must not demand yamine's block.
+  def test_hand_added_entry_outside_the_block_counts
+    write_hosts("127.0.0.1 myapp.localhost\n")
 
-    refute_nil resolved, "getaddrinfo must resolve localhost"
+    assert Yamine::Hosts.hosts_entry?("myapp.localhost", @path)
+  end
+
+  def test_ipv6_loopback_mapping_counts
+    write_hosts("::1 myapp.localhost\n")
+
+    assert Yamine::Hosts.hosts_entry?("myapp.localhost", @path)
+  end
+
+  def test_comments_tabs_and_case_are_ignored
+    write_hosts("# Host Database\n127.0.0.1\tMyApp.Localhost # inline comment\n")
+
+    assert Yamine::Hosts.hosts_entry?("myapp.localhost", @path)
+  end
+
+  # The proxy serves on loopback; a mapping elsewhere points the name
+  # away from yamine and must not read as "resolves to the proxy".
+  def test_non_loopback_mapping_does_not_count
+    write_hosts("10.0.0.5 myapp.localhost\n")
+
+    refute Yamine::Hosts.hosts_entry?("myapp.localhost", @path)
+  end
+
+  def test_missing_file_has_no_entries
+    refute Yamine::Hosts.hosts_entry?("myapp.localhost", File.join(@dir, "nope"))
+  end
+
+  def test_entry_in_the_file_is_ok
+    write_hosts("127.0.0.1 myapp.test\n")
+
+    assert_equal :ok, Yamine::Hosts.classification("myapp.test", @path)
+  end
+
+  # The load-bearing no-probe: classification must not ask getaddrinfo
+  # about .localhost, because its unconditional yes is exactly the false
+  # "resolves" that hid this gap from doctor and boot.
+  def test_localhost_without_entry_is_warn_without_a_probe
+    Addrinfo.expects(:getaddrinfo).never
+
+    assert_equal :warn, Yamine::Hosts.classification("myapp.localhost", @path)
+  end
+
+  # .invalid cannot resolve anywhere; the probe confirms the name is
+  # truly dead rather than served by real DNS.
+  def test_custom_tld_missing_everywhere_is_fail
+    write_hosts("")
+
+    assert_equal :fail, Yamine::Hosts.classification("this-host-does-not-exist.invalid", @path)
+  end
+
+  # A custom TLD served by real DNS or /etc/resolver resolves for every
+  # client without a hosts entry — ok, not a sync candidate.
+  def test_custom_tld_resolved_by_dns_is_ok
+    write_hosts("")
+    Addrinfo.stubs(:getaddrinfo).returns([:addr])
+
+    assert_equal :ok, Yamine::Hosts.classification("myapp.test", @path)
+  end
+
+  def test_resolution_partitions_by_class
+    write_hosts("127.0.0.1 synced.test\n")
+
+    groups = Yamine::Hosts.resolution(
+      ["synced.test", "native.localhost", "gone.invalid"], @path)
+
+    assert_equal ["synced.test"], groups[:ok]
+    assert_equal ["native.localhost"], groups[:warn]
+    assert_equal ["gone.invalid"], groups[:fail]
   end
 end

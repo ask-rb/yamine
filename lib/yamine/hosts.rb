@@ -4,9 +4,11 @@ require "socket"
 require "timeout"
 
 module Yamine
-  # /etc/hosts sync for Safari + custom TLDs (.localhost resolves natively
-  # in Chrome/Firefox/Edge; Safari uses the system resolver).
-  # Same managed-block approach as portless hosts.ts.
+  # /etc/hosts sync for the client classes that cannot resolve the routes
+  # on their own: custom TLDs, and resolvers that read only the hosts file
+  # (a CGO-disabled Go binary is the common case — no system resolver, no
+  # RFC 6761 special-casing). Same managed-block approach as portless
+  # hosts.ts.
   module Hosts
     BEGIN_MARKER = "# --- yamine begin ---"
     END_MARKER = "# --- yamine end ---"
@@ -44,14 +46,13 @@ module Yamine
     # Bring the managed block to exactly these hostnames. Idempotent: when
     # the block already matches, this is a no-op returning true.
     #
-    # The short-circuit is load-bearing, not an optimization. /etc/hosts is
+    # The sync short-circuit is load-bearing, not an optimization. /etc/hosts is
     # root-owned on a normal machine, so a rewrite fails without sudo — and
     # `setup` and every boot's workstation check run this. Without the
     # guard, a machine whose hosts file was already correct got a
     # "could not write /etc/hosts (try sudo yamine hosts sync)" warning on
     # every run, sending people to an elevated write for a file that
-    # needed nothing. (Chrome/Firefox/Edge resolve *.localhost natively;
-    # /etc/hosts only matters for Safari and custom TLDs.)
+    # needed nothing.
     def sync(hostnames, path = PATH)
       return true if synced?(hostnames, path)
 
@@ -85,26 +86,60 @@ module Yamine
       false
     end
 
-    # Does the hostname resolve for the programs that will actually use
-    # it — browsers, curl, the app's own HTTP clients? That question can
-    # only be answered by the SYSTEM resolver (getaddrinfo), which reads
-    # nsswitch (so /etc/hosts counts) and implements the RFC 6761
-    # special-use TLDs.
-    #
-    # Ruby's Resolv is a pure-Ruby DNS client: it never sees /etc/hosts
-    # and knows nothing about RFC 6761, so it reports "no address for
-    # myapp.localhost" on a machine where .localhost resolves perfectly.
-    # That false negative sent users to `sudo yamine hosts sync` — an
-    # elevated write to /etc/hosts — to fix a problem they did not have.
-    def resolves?(hostname)
-      Timeout.timeout(2) { Addrinfo.getaddrinfo(hostname, nil) }
-      true
-    rescue SocketError, SystemCallError, Timeout::Error
+    # Loopback mappings that count as "this name reaches the proxy".
+    LOOPBACK = %w[127.0.0.1 ::1].freeze
+
+    # Does the hosts file map this hostname to loopback? That is the one
+    # resolution source every client shares — browsers and curl, the
+    # system resolver, and resolvers that read only the file (a
+    # CGO-disabled Go binary is the common case). The whole file is
+    # searched, not just the managed block, so a hand-added entry counts;
+    # only loopback mappings count, since the proxy serves on loopback
+    # and any other address points the name away from yamine.
+    def hosts_entry?(hostname, path = PATH)
+      target = hostname.to_s.downcase
+      File.foreach(path) do |line|
+        parts = line.split("#", 2).first.to_s.split
+        next unless parts.length > 1 && LOOPBACK.include?(parts.first.downcase)
+        return true if parts[1..].any? { |name| name.downcase == target }
+      end
+      false
+    rescue SystemCallError
       false
     end
 
-    def unresolved(hostnames)
-      hostnames.reject { |h| resolves?(h) }
+    # Where one hostname stands for the clients that will actually use
+    # it — a question with three answers no single resolver probe can
+    # produce:
+    #
+    #   :ok   — every client resolves it: mapped in the hosts file, or
+    #           found by the system resolver without it (real DNS or an
+    #           /etc/resolver entry for a custom TLD).
+    #   :warn — browsers and curl handle it (the RFC 6761 .localhost
+    #           special case), but file-only resolvers cannot see it.
+    #   :fail — nothing resolves it.
+    #
+    # .localhost names are classified :warn on file absence alone. The
+    # system resolver answers any .localhost unconditionally, so probing
+    # it carries no information — and acting on that probe is how doctor
+    # and boot once reported every .localhost as fully resolved while a
+    # CGO-disabled Go binary could not resolve any of them.
+    def classification(hostname, path = PATH)
+      return :ok if hosts_entry?(hostname, path)
+      return :warn if hostname.to_s.downcase.end_with?(".localhost")
+
+      Timeout.timeout(2) { Addrinfo.getaddrinfo(hostname, nil) }
+      :ok
+    rescue SocketError, SystemCallError, Timeout::Error
+      :fail
+    end
+
+    # Partition hostnames into { ok:, warn:, fail: } for the consumers
+    # that report one line per state (doctor, boot).
+    def resolution(hostnames, path = PATH)
+      groups = { ok: [], warn: [], fail: [] }
+      hostnames.each { |h| groups[classification(h, path)] << h }
+      groups
     end
   end
 end

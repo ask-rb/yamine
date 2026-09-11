@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.13.2] — 2026-09-12
+
+### Fixed
+
+- **"Resolves" now means "resolves for every client", not "the system
+  resolver said yes".** `Hosts.resolves?` asked `Addrinfo.getaddrinfo`,
+  which on macOS answers any `.localhost` name unconditionally — so
+  doctor and boot reported every `.localhost` route as fully resolved
+  even with no `/etc/hosts` entry, while a client that resolves only
+  from the hosts file (a CGO-disabled Go binary; AnyGit is the case
+  that found it) could not resolve any of them. That invisible gap is
+  why `sudo yamine hosts sync` existed as a manual step at all.
+
+  The check is now state-based. `Hosts.hosts_entry?` reads the hosts
+  file directly — any loopback mapping counts, hand-added entries
+  included, not just yamine's managed block — and `Hosts.resolution`
+  classifies each route as `ok` (every client resolves it), `warn`
+  (browsers and curl fine via the RFC 6761 `.localhost` special case;
+  file-only resolvers cannot see it), or `fail` (nothing resolves it).
+  Doctor renders the warn class with its existing `[warn]` state instead
+  of a failure — the 0.7.0 lesson, kept by severity and wording rather
+  than by a probe — and boot names the two gaps separately.
+
+  `.localhost` names are classified on file absence alone: the system
+  resolver's unconditional yes carries no information, and acting on it
+  was the bug. getaddrinfo now runs only for custom-TLD names the file
+  does not answer (real DNS or `/etc/resolver` setups stay `ok`), so
+  the common doctor path does no probing at all.
+
 ## [0.13.1] — 2026-09-12
 
 ### Fixed

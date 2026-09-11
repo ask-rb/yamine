@@ -157,7 +157,7 @@ module Yamine
         end
 
         say opts
-        ctx.report_unresolved(routes_registered.flat_map { |r| r[:hostnames] })
+        ctx.report_resolution_gaps(routes_registered.flat_map { |r| r[:hostnames] })
 
         # Supervisor: exit when ANY child dies (loud cleanup). pid => name
         # so the message names the casualty instead of "a process".

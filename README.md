@@ -122,7 +122,9 @@ destination pattern). Naming a variant also prefixes the hostname — see
 below for how that differs from a worktree's automatic prefix.
 
 `.localhost` resolves to loopback natively in Chrome, Firefox, and Edge —
-no DNS server, no `/etc/resolver`. Safari may need `yamine hosts sync`.
+no DNS server, no `/etc/resolver`. Safari, custom TLDs, and resolvers
+that read only `/etc/hosts` (CGO-disabled Go binaries are the common
+case) need `yamine hosts sync`.
 
 ## Hostname shape
 

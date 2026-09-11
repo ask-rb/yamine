@@ -11,7 +11,7 @@ class CLITest < Minitest::Test
     @dir = Dir.mktmpdir
     @orig_state = ENV["YAMINE_STATE_DIR"]
     ENV["YAMINE_STATE_DIR"] = @dir
-    Yamine::Hosts.stubs(:unresolved).returns([])
+    Yamine::Hosts.stubs(:resolution).returns(ok: [], warn: [], fail: [])
   end
 
   def teardown

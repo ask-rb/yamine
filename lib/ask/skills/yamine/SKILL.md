@@ -144,8 +144,10 @@ yamine prune                  # clear stale routes from crashed sessions
 yamine start --json           # boot readiness payload (pass/fail + log tail)
 ```
 
-If a hostname does not resolve: `yamine hosts sync`. If the browser
-warns about TLS: `yamine trust`.
+If a hostname does not resolve — or boot/doctor report it as not in
+`/etc/hosts` and you use clients that read only that file (CGO-disabled
+Go binaries): `yamine hosts sync`. If the browser warns about TLS:
+`yamine trust`.
 
 ## When NOT to use yamine
 

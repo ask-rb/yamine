@@ -160,12 +160,24 @@ module Yamine
       hostnames = store.load_routes.map { |r| r["hostname"] }
       return Check.new(name: "dns", ok: true, message: "no routes to resolve") if hostnames.empty?
 
-      missing = Hosts.unresolved(hostnames)
-      if missing.empty?
+      groups = Hosts.resolution(hostnames)
+      problems = []
+      problems << "#{groups[:fail].join(", ")} do not resolve — run: yamine hosts sync" unless groups[:fail].empty?
+      unless groups[:warn].empty?
+        problems << "#{groups[:warn].join(", ")} not in /etc/hosts — browsers and curl " \
+          "resolve them anyway, but clients that only read the hosts file " \
+          "(CGO-disabled Go binaries) cannot — run: yamine hosts sync if you use such clients"
+      end
+
+      if problems.empty?
         Check.new(name: "dns", ok: true, message: "all #{hostnames.length} hostname(s) resolve")
+      elsif groups[:fail].empty?
+        # Only the file-only-resolver gap: most clients are fine, so this
+        # is a warn, not a failure — failing here sent browser-only users
+        # to an elevated hosts write they did not need (the 0.7.0 lesson).
+        Check.new(name: "dns", ok: true, warn: true, message: problems.join("; "))
       else
-        Check.new(name: "dns", ok: false,
-          message: "#{missing.join(", ")} do not resolve — run: yamine hosts sync")
+        Check.new(name: "dns", ok: false, message: problems.join("; "))
       end
     end
 

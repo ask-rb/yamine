@@ -218,3 +218,63 @@ class JsonStdoutContractTest < Minitest::Test
     assert_match(/Starting proxy/, err.string)
   end
 end
+
+# The dns check's severity is the whole point of the 0.7.0 fix and its
+# 0.13.1 follow-up: a name only file-only resolvers cannot see is a warn
+# (browsers are fine; a failure would send browser-only users to an
+# elevated hosts write), while a name nothing resolves is a failure.
+class DoctorDnsTest < Minitest::Test
+  def store_with(*hostnames)
+    store = mock("store")
+    store.stubs(:load_routes).returns(hostnames.map { |h| { "hostname" => h } })
+    store
+  end
+
+  def test_no_routes_is_ok
+    check = Yamine::Doctor.check_dns(store_with)
+
+    assert check.ok
+    refute check.warn?
+  end
+
+  def test_all_resolving_is_ok
+    Yamine::Hosts.stubs(:resolution).returns(ok: ["a.localhost"], warn: [], fail: [])
+
+    check = Yamine::Doctor.check_dns(store_with("a.localhost"))
+
+    assert check.ok
+    refute check.warn?
+  end
+
+  # The .localhost gap: browsers and curl resolve it, file-only resolvers
+  # (CGO-disabled Go) do not. Visible, but never a failure.
+  def test_file_only_resolver_gap_is_warn_not_fail
+    Yamine::Hosts.stubs(:resolution).returns(ok: [], warn: ["a.localhost"], fail: [])
+
+    check = Yamine::Doctor.check_dns(store_with("a.localhost"))
+
+    assert check.ok, "a .localhost gap must not fail doctor — browsers are fine"
+    assert check.warn?
+    assert_match(/not in \/etc\/hosts/, check.message)
+    assert_match(/hosts sync/, check.message)
+  end
+
+  def test_nothing_resolves_is_a_failure
+    Yamine::Hosts.stubs(:resolution).returns(ok: [], warn: [], fail: ["gone.invalid"])
+
+    check = Yamine::Doctor.check_dns(store_with("gone.invalid"))
+
+    refute check.ok
+    assert_match(/do not resolve/, check.message)
+  end
+
+  def test_fail_and_warn_are_reported_together_as_a_failure
+    Yamine::Hosts.stubs(:resolution).returns(ok: [], warn: ["a.localhost"], fail: ["gone.invalid"])
+
+    check = Yamine::Doctor.check_dns(store_with("a.localhost", "gone.invalid"))
+
+    refute check.ok
+    assert_match(/gone\.invalid do not resolve/, check.message)
+    assert_match(/a\.localhost not in \/etc\/hosts/, check.message)
+  end
+end

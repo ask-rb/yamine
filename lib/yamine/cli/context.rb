@@ -35,11 +35,22 @@ module Yamine
         ProxyControl.proxy_tls(store)
       end
 
-      def report_unresolved(hostnames)
-        missing = Hosts.unresolved(hostnames)
-        return if missing.empty?
+      # Boot-time DNS report. Two distinct gaps, named separately: a fail
+      # resolves nowhere; a warn resolves in browsers and curl (the RFC
+      # 6761 .localhost special case) but not for clients that read only
+      # /etc/hosts — which is exactly the gap `hosts sync` closes.
+      def report_resolution_gaps(hostnames)
+        groups = Hosts.resolution(hostnames)
+        return if groups[:fail].empty? && groups[:warn].empty?
 
-        warn "Warning: #{missing.join(", ")} will not resolve. Run: yamine hosts sync"
+        unless groups[:fail].empty?
+          warn "Warning: #{groups[:fail].join(", ")} will not resolve. Run: yamine hosts sync"
+        end
+        unless groups[:warn].empty?
+          warn "Warning: #{groups[:warn].join(", ")} not in /etc/hosts — browsers and curl " \
+            "resolve them anyway, but clients that only read /etc/hosts (CGO-disabled Go " \
+            "binaries) cannot. Run: yamine hosts sync if you use such clients."
+        end
       end
 
       def wait_for_exit(pid, timeout:)
