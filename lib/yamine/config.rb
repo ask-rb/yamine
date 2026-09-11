@@ -51,7 +51,12 @@ module Yamine
       "service" => "myapp",
       "proxy" => {
         "tld" => "localhost",
-        "host" => "myapp.local.example.com"
+        "host" => "myapp.local.example.com",
+        # Opt this app into answering its own subdomains. Off by default:
+        # an unregistered label under a live app is far more likely to be
+        # a stopped worktree than a tenant, and resolving it to the wrong
+        # app is worse than not resolving it.
+        "subdomains" => false
       },
       # db: false opts out of per-worktree databases entirely (exotic
       # setups: manual establish_connection, shared staging DB, ...).
@@ -178,6 +183,14 @@ module Yamine
       data[key]
     end
 
+    # Whether this app answers its own subdomains. Off unless asked: the
+    # ambient fallback used to hand any unregistered label to whichever
+    # app owned the parent name, which reads as the right app running the
+    # wrong code — the worktree case that motivated the opt-in.
+    def subdomains?
+      proxy_config["subdomains"] == true
+    end
+
     private
 
     def load_secrets
@@ -274,6 +287,9 @@ module Yamine
       if value["tld"] && !Sanitize.valid_tld?(value["tld"].downcase)
         raise ConfigError, "#{context}: invalid tld #{value["tld"].inspect}"
       end
+      if value.key?("subdomains") && ![true, false].include?(value["subdomains"])
+        raise ConfigError, "#{context}: subdomains must be a boolean"
+      end
     end
 
     def validate_db(value, context)
@@ -364,11 +380,26 @@ module Yamine
         elsif example_value.is_a?(Array) && value.is_a?(Array)
           validate_array_of!(value, example_value.first.class) unless example_value.empty?
         elsif !example_value.nil?
-          expected = type_description(example_value.class)
-          unless value.is_a?(example_value.class) || (example_value.is_a?(String) && value.is_a?(String))
-            raise ConfigError, "#{current_context}: expected #{expected}, got #{value.class.name.downcase}"
+          # Booleans are one type, but the example can only name one class
+          # (TrueClass for `true`), so a literal `false` compared as
+          # falseclass and was rejected: `proxy: false` on a process
+          # raised "expected a boolean, got falseclass". Ask the value
+          # what it is instead of the example.
+          if boolean?(example_value)
+            unless boolean?(value)
+              raise ConfigError, "#{current_context}: expected a boolean, got #{value.class.name.downcase}"
+            end
+          else
+            expected = type_description(example_value.class)
+            unless value.is_a?(example_value.class) || (example_value.is_a?(String) && value.is_a?(String))
+              raise ConfigError, "#{current_context}: expected #{expected}, got #{value.class.name.downcase}"
+            end
           end
         end
+      end
+
+      def boolean?(value)
+        value == true || value == false
       end
 
       def validate_array_of!(array, type)

@@ -106,6 +106,17 @@ module Yamine
     end
 
     # Pure request-routing core, tested without sockets.
+    #
+    # Exact hostname first, then an opted-in wildcard. The wildcard is
+    # deliberately not ambient: a route only answers its own subdomains
+    # when it registered with `subdomains: true` (config
+    # `proxy.subdomains`, or `yamine alias --wildcard`).
+    #
+    # It used to be unconditional, which meant every unregistered label
+    # under any live app silently resolved to that app. The expensive
+    # case is a worktree: `<branch>.myapp.localhost` answered as the main
+    # checkout — a wrong-but-working app, indistinguishable from the
+    # right one. An unregistered hostname now 404s, and says so.
     def route(authority, routes)
       host = Hostname.strip_port(authority)
       return nil if host.empty? || host.bytesize > MAX_HOSTNAME_BYTES
@@ -113,8 +124,7 @@ module Yamine
       exact = routes.find { |r| r["hostname"] == host }
       return exact if exact
 
-      wildcard = routes.find { |r| host.end_with?(".#{r["hostname"]}") }
-      wildcard
+      routes.find { |r| r["subdomains"] && host.end_with?(".#{r["hostname"]}") }
     end
 
     def check_hops(headers)
@@ -452,9 +462,23 @@ module Yamine
         return respond(sock, 404, "<h1>Not Found</h1>")
       end
 
+      # A label in front of a live app is almost always a worktree or a
+      # branch whose stack is not running. Name the parent it would fall
+      # under and where it lives, so "the app loaded but it's the wrong
+      # code" becomes "that worktree isn't running" without a search.
+      parent = routes.find { |r| bare.end_with?(".#{r["hostname"]}") }
+      hint = if parent
+        dir = parent.dig("spec", "dir")
+        where = dir ? " in #{escape(dir)}" : ""
+        "<p><strong>#{escape(parent["hostname"])}</strong> is running#{where}.</p>" \
+          "<p>If #{escape(bare)} is a worktree or branch, start it there " \
+          "(<code>yamine start</code>), or open " \
+          "<strong>#{escape(parent["hostname"])}</strong> instead.</p>"
+      end
+
       items = routes.map { |r| "<li>#{escape(r["hostname"])}</li>" }.join
       body = "<h1>No app registered for #{escape(bare)}</h1>" \
-             "<ul>#{items}</ul>"
+             "#{hint}<ul>#{items}</ul>"
       respond(sock, 404, body)
     end
 

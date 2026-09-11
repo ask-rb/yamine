@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.13.0] — 2026-09-11
+
+### Changed
+
+- **The subdomain fallback is now opt-in: `proxy.subdomains`.** A route
+  used to answer its own subdomains unconditionally, so *any* label under
+  a live app silently resolved to that app. The expensive case is a
+  worktree: once `<branch>.myapp.localhost` became the worktree URL, the
+  same hostname with that worktree **stopped** answered as the main
+  checkout — HTTP 200, a real app, the wrong code, and nothing to
+  distinguish it from the right answer. You had to notice the branch
+  was running to know you were looking at someone else's build.
+
+  Unregistered hostnames now 404 instead, and the page names the parent
+  app and its directory: "`myapp.localhost` is running in `/code/myapp`.
+  If `my-branch.myapp.localhost` is a worktree or branch, start it there
+  (`yamine start`)." The failure states its own fix.
+
+  Opting in is one line per app that genuinely wants it:
+
+  ```yaml
+  proxy:
+    subdomains: true     # this app answers *.myapp.localhost
+  ```
+
+  `yamine alias <name> <port> --wildcard` is the same opt-in for a
+  single ad-hoc route. `yamine status` now reports which mode an app is
+  in, since it changes what an unregistered label resolves to.
+
+  Nothing depended on the ambient behavior: no sibling app config used
+  subdomains, and the only artifact was one test, now the opt-in test.
+  Route files written before this need no migration — the flag is absent
+  unless set, and absent means exact hostname only.
+
+### Fixed
+
+- **`proxy: false` on a process named `web` no longer fails validation.**
+  The EXAMPLE can only name one class per key (`true` → TrueClass), so a
+  literal `false` was compared as falseclass and rejected with the
+  self-contradictory "expected a boolean, got falseclass". Booleans are
+  now checked as booleans.
+
 ## [0.12.0] — 2026-09-11
 
 ### Fixed
@@ -84,10 +126,10 @@
 
 - **Ruby, git, and curl now trust the local CA — so an app can call
   another app at `https://<name>.localhost` with no configuration.** The
-  gap surfaced when anywaye (a Rails app) tried to reach anymark at
-  `https://anymark-directory.localhost`: `certificate verify failed`. The
-  CA was trusted everywhere a human looks (Safari, Chrome, curl) and
-  nowhere a child process looks — only Node was covered, via
+  gap surfaced when anywaye (a Rails app) tried to reach a second
+  checkout of anymark at its `.localhost` URL: `certificate verify
+  failed`. The CA was trusted everywhere a human looks (Safari, Chrome,
+  curl) and nowhere a child process looks — only Node was covered, via
   `NODE_EXTRA_CA_CERTS`.
 
   The naive fix is wrong in a way that shows up much later. `SSL_CERT_FILE`

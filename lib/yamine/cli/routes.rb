@@ -147,14 +147,20 @@ module Yamine
           puts "Removed alias #{hostname}."
           return
         end
-        name, port_or_url = args
-        raise Error, "Usage: yamine alias <name> <port|url>" unless name && port_or_url
+        name, port_or_url = args.reject { |a| a.start_with?("--") }
+        raise Error, "Usage: yamine alias <name> <port|url> [--wildcard]" unless name && port_or_url
 
         hostname = alias_hostname(name)
         target = port_or_url.match?(/\A\d+\z/) ? "127.0.0.1:#{port_or_url}" : port_or_url
         force = args.include?("--force")
-        ctx.store.add_route(hostname, target, 0, kind: "tcp", force: force)
-        puts "#{hostname} -> #{target}"
+        # --wildcard is the per-route escape hatch for the tenant case:
+        # this alias answers its own subdomains. Config `proxy.subdomains`
+        # is the same opt-in for a whole app at boot.
+        wildcard = args.include?("--wildcard")
+        ctx.store.add_route(hostname, target, 0, kind: "tcp", force: force,
+          subdomains: wildcard)
+        suffix = wildcard ? " (and its subdomains)" : ""
+        puts "#{hostname} -> #{target}#{suffix}"
       end
 
       # A name containing dots is treated as a full hostname (any TLD);
@@ -282,6 +288,7 @@ module Yamine
           host: resolved.host, host_source: resolved.sources[:host],
           variant: resolved.variant, variant_source: resolved.sources[:variant],
           overlay: resolved.overlay, overlay_source: resolved.sources[:overlay],
+          subdomains: resolved.subdomains,
           urls: urls,
           processes: resolved.processes.keys,
           framework: Framework.detect(Dir.pwd).to_s
@@ -302,6 +309,9 @@ module Yamine
         # explicit --variant / YAMINE_VARIANT ever sets it, so say so
         # rather than letting the two look like one setting.
         puts "overlay:   #{payload[:overlay] ? "#{payload[:overlay]} (merged)" : "(none)"}"
+        # Off by default; say when it is on, because it changes what an
+        # unregistered label under this app resolves to.
+        puts "subdomains: #{payload[:subdomains] ? "own subdomains resolve here" : "exact hostname only"}"
         puts "processes: #{payload[:processes].join(", ")}"
         puts "urls:"
         urls.each { |u| puts "  #{u}" }

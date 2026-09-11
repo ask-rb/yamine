@@ -19,6 +19,17 @@ class RouteStoreTest < Minitest::Test
     assert_equal "socket", found["kind"]
   end
 
+  # The flag is written only when set, so route files from before this
+  # existed read as "exact hostname only" with no migration.
+  def test_subdomains_flag_is_absent_unless_asked_for
+    @store.add_route("plain.localhost", "127.0.0.1:4001", Process.pid, kind: "tcp")
+    @store.add_route("wild.localhost", "127.0.0.1:4002", Process.pid, kind: "tcp",
+      subdomains: true)
+
+    refute @store.find("plain.localhost").key?("subdomains")
+    assert_equal true, @store.find("wild.localhost")["subdomains"]
+  end
+
   def test_stale_pids_pruned_on_read
     dead_pid = spawn_dead_pid
     @store.add_route("old.localhost", "127.0.0.1:4001", dead_pid, kind: "tcp")

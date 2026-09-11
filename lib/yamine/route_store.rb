@@ -76,7 +76,12 @@ module Yamine
     # `agent` records the owner (defaults to Agent.name); foreign-owned
     # live routes can only be taken with force: true, and the conflict
     # error names the other agent plus its worktree dir.
-    def add_route(hostname, target, pid, kind:, force: false, spec: nil, agent: nil)
+    #
+    # `subdomains` opts this route into answering its own subdomains.
+    # Absent (the default, and what every pre-existing route file has)
+    # means exact hostname only — see Proxy#route for why.
+    def add_route(hostname, target, pid, kind:, force: false, spec: nil, agent: nil,
+      subdomains: false)
       agent ||= Agent.name
       killed = nil
       with_lock do
@@ -101,6 +106,7 @@ module Yamine
         entry = { "hostname" => hostname, "target" => target, "kind" => kind,
                   "pid" => pid, "agent" => agent }
         entry["spec"] = spec if spec
+        entry["subdomains"] = true if subdomains
         routes << entry
         save_routes(routes)
       end

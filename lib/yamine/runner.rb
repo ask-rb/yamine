@@ -99,7 +99,7 @@ module Yamine
     # win over it, because those describe the boot rather than the app.
     def boot_run(name:, hostname:, url:, dir:, command:, port: nil, force: false,
       rails_dev_host: nil, register: true, database_url: nil, spec: nil,
-      extra_env: nil)
+      extra_env: nil, subdomains: false)
       port ||= Ports.find_free
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
         database_url: database_url, extra_env: extra_env)
@@ -111,7 +111,7 @@ module Yamine
         begin
           spec ||= { "dir" => File.expand_path(dir), "proc" => name }
           @store.add_route(hostname, target, Process.pid, kind: "tcp",
-            force: force, spec: spec)
+            force: force, spec: spec, subdomains: subdomains)
           write_backend_pid(hostname, pid)
         rescue StandardError
           # Registration refused (quota, conflict): the backend is
@@ -140,9 +140,9 @@ module Yamine
     end
 
     # Register an already-spawned backend: route + sidecar, together.
-    def adopt(hostname, app, force: false, spec: nil)
+    def adopt(hostname, app, force: false, spec: nil, subdomains: false)
       @store.add_route(hostname, app.target, Process.pid, kind: app.kind,
-        force: force, spec: spec)
+        force: force, spec: spec, subdomains: subdomains)
       write_backend_pid(hostname, app.pid)
       nil
     end

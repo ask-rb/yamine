@@ -98,6 +98,17 @@ Only an explicit variant ever looks for an overlay file — a branch name
 that happens to match one on disk is ignored. `yamine status` shows
 `variant:` and `overlay:` separately.
 
+## Subdomains are opt-in
+
+A route answers its exact hostname. `*.myapp.localhost` reaches the app
+only if it asked (`proxy.subdomains: true` in `config/local.yml`, or
+`yamine alias <name> <port> --wildcard` for one route).
+
+So a worktree whose stack is not running gets a 404 that names the parent
+app, its directory, and `yamine start` — not the parent app's code. If
+you hit a `.localhost` URL that loads but looks wrong, check you started
+the worktree you think you did; `yamine status` in it prints the URL.
+
 ## First time on a machine
 
 Run `yamine start` — it does the one-shot CA trust, port 443, and

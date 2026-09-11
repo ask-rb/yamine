@@ -243,6 +243,7 @@ module Yamine
             url: item[:url], dir: Dir.pwd, command: item[:command],
             port: item[:port], force: opts[:force],
             rails_dev_host: item[:hostname], database_url: db_url,
+            subdomains: resolved.subdomains,
             extra_env: build_env(resolved, item[:entry], proc_name: item[:name]))
           routes_registered << { hostnames: item[:hostnames], app: app }
 
@@ -281,7 +282,8 @@ module Yamine
         if failed.empty?
           apps.each do |name, slot|
             runner.adopt(slot[:item][:hostname], slot[:app], force: opts[:force],
-              spec: { "dir" => File.expand_path(Dir.pwd), "proc" => name })
+              spec: { "dir" => File.expand_path(Dir.pwd), "proc" => name },
+              subdomains: resolved.subdomains)
             routes_registered << { hostnames: slot[:item][:hostnames], app: slot[:app] }
             say opts, "  -> #{slot[:item][:url]}"
           end

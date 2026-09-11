@@ -9,7 +9,7 @@ module Yamine
     module_function
 
     Result = Struct.new(:app, :tld, :host, :processes, :secrets,
-      :sources, :variant, :overlay, :db, :env, keyword_init: true)
+      :sources, :variant, :overlay, :subdomains, :db, :env, keyword_init: true)
 
     # Two axes, and keeping them apart is the whole point:
     #
@@ -69,6 +69,7 @@ module Yamine
         sources: sources,
         variant: variant_name,
         overlay: overlay,
+        subdomains: config.subdomains?,
         db: config.data["db"],
         env: config.env_config
       )

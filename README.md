@@ -91,6 +91,7 @@ of truth for service name, proxy TLD/host, processes, and env:
 service: myapp
 proxy:
   tld: localhost
+  subdomains: false      # opt in to answering *.myapp.localhost
 processes:
   web:
     cmd: bundle exec puma -b tcp://127.0.0.1:$PORT config.ru
@@ -162,10 +163,25 @@ yamine --variant demo                           # -> https://demo.myapp.localhos
 yamine --tld preview.example.com                # your own domain (OAuth parity)
 ```
 
-Because a registered route answers `*.` subdomains of itself, any
-`<label>.myapp.localhost` reaches the main checkout until a worktree
-registers that exact name — at which point the exact route wins and the
-worktree takes over.
+## Subdomains are opt-in
+
+A route answers its exact hostname. `*.myapp.localhost` reaches
+`myapp.localhost` only if that app asked for it:
+
+```yaml
+proxy:
+  subdomains: true     # this app answers its own subdomains
+```
+
+```bash
+yamine alias tenant1 4001 --wildcard   # one route, its subdomains
+```
+
+Off is the useful default. An unregistered label under a live app is far
+more likely to be a worktree whose stack is stopped than a tenant, and
+handing that label to the parent app means HTTP 200 with the wrong code.
+Instead the request 404s and names the parent app, its directory, and how
+to start it. `yamine status` reports which mode an app is in.
 
 ## Commands
 

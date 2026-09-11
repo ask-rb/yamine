@@ -40,6 +40,38 @@ class ConfigTest < Minitest::Test
   def test_missing_config_returns_nil
     assert_nil Yamine::Config.load(@dir)
   end
+
+  # ── proxy.subdomains ────────────────────────────────────────────────
+
+  def test_subdomains_defaults_to_off
+    write_yml("service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    refute Yamine::Config.load(@dir).subdomains?
+  end
+
+  def test_subdomains_opt_in
+    write_yml("service: myapp\nproxy:\n  tld: localhost\n  subdomains: true\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    assert Yamine::Config.load(@dir).subdomains?
+  end
+
+  def test_subdomains_must_be_a_boolean
+    write_yml("service: myapp\nproxy:\n  tld: localhost\n  subdomains: \"yes\"\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    err = assert_raises(Yamine::ConfigError) { Yamine::Config.load(@dir) }
+    assert_match(/subdomains.*expected a boolean/, err.message)
+  end
+
+  # A boolean example can only name one class, so `proxy: false` used to
+  # fail as "expected a boolean, got falseclass" whenever the example
+  # happened to say `true`.
+  def test_false_passes_where_the_example_says_true
+    write_yml("service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: false")
+    config = Yamine::Config.load(@dir)
+    assert_equal false, config.processes["web"]["proxy"]
+  end
+
+  def test_processes_still_reject_non_booleans
+    write_yml("service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: \"yes\"")
+    assert_raises(Yamine::ConfigError) { Yamine::Config.load(@dir) }
+  end
 end
 
 class ResolverTest < Minitest::Test
@@ -157,6 +189,12 @@ class ResolverTest < Minitest::Test
     assert_nil r.variant
     assert_nil r.overlay
     assert_equal ["myapp.localhost"], Yamine::Resolver.hostnames(r)
+  end
+
+  # boot reads this off the Result to decide what it registers
+  def test_subdomains_reaches_the_result
+    write_yml("service: myapp\nproxy:\n  tld: localhost\n  subdomains: true\nprocesses:\n  web:\n    cmd: s\n    proxy: true")
+    assert Yamine::Resolver.resolve(@dir).subdomains
   end
 
   def write_yml_at(dir, content)
