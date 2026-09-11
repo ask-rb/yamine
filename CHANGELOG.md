@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.13.1] — 2026-09-12
+
+### Fixed
+
+- **`worktree clean` no longer reports "could not drop — remove manually"
+  for a database that never existed.** `dropdb` fails on a missing
+  database, and the old code collapsed that into a generic failure. Now
+  `Database.drop` returns an honest three-state outcome — `:dropped`,
+  `:missing` (nothing to drop, not an error), `:failed` (server
+  unreachable or drop refused) — by splitting "server reachable" from
+  "database present". Clean prints each outcome (`dropped N`,
+  `N did not exist — nothing to drop`) plus a summary line, exits 1 only
+  when something really failed, and **keeps the claim of a failed drop**
+  so the next clean can retry it (the old code deleted all claims
+  regardless, losing track of databases it failed to drop).
+- `db drop` and `db create` resolve the DATABASE_URL template the way
+  boot does (ENV, then config env.clear) instead of ENV-only, so they
+  work from a shell without the variable exported.
+
 ## [0.13.0] — 2026-09-11
 
 ### Changed

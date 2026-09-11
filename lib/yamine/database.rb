@@ -100,6 +100,28 @@ module Yamine
       nil
     end
 
+    # The DATABASE_URL template per-worktree names derive from: ENV
+    # first, then the config's top-level env.clear, then per-process
+    # env.clear (configs written before top-level env existed). Shared
+    # by boot, `db create/drop`, and `worktree clean` so they all agree.
+    # Takes anything responding to .env (resolver Result / Config) —
+    # pass env_config for a bare Config.
+    def template_for(resolved)
+      source = if resolved.respond_to?(:env)
+        resolved.env
+      else
+        resolved.env_config
+      end
+      top = source.is_a?(Hash) ? source["clear"] : nil
+      from_top = top.is_a?(Hash) ? top["DATABASE_URL"] : nil
+      return from_top if from_top && !from_top.to_s.strip.empty?
+
+      processes = resolved.respond_to?(:processes) ? resolved.processes : {}
+      env = processes.values.map { |e| e["env"] || {} }
+      clear = env.map { |e| e["clear"] || {} }.reduce({}, :merge)
+      clear["DATABASE_URL"]
+    end
+
     # Databases whose worktree dirs no longer exist (for `worktree clean`).
     def orphaned(state_dir)
       load_map(state_dir).select { |_, v| !File.directory?(v["dir"]) }
@@ -144,6 +166,73 @@ module Yamine
       when :mysql then mysql_exists?(name, database_url)
       else false
       end
+    end
+
+    # Drop a database with an honest outcome. Returns :dropped,
+    # :missing (the database did not exist — nothing to do, NOT an
+    # error), or :failed (server unreachable, drop refused). The
+    # distinction matters: `worktree clean` used to print "could not
+    # drop — remove manually" for a database that never existed,
+    # sending the user hunting for locks and permissions that were
+    # never the problem.
+    def drop(name, database_url)
+      case adapter_for(database_url)
+      when :postgres then pg_drop(name, database_url)
+      when :mysql then mysql_drop(name, database_url)
+      else :failed
+      end
+    end
+
+    def pg_drop(name, database_url)
+      reachable, exists = pg_state(name, database_url)
+      return :missing if reachable && !exists
+      return :failed unless reachable
+
+      uri = URI.parse(database_url)
+      _out, status = Open3.capture2("dropdb", name, env: pg_env(uri))
+      return :dropped if status.success?
+
+      reachable, exists = pg_state(name, database_url)
+      reachable && exists ? :failed : :dropped
+    rescue SystemCallError
+      :failed
+    end
+
+    def mysql_drop(name, database_url)
+      reachable, exists = mysql_state(name, database_url)
+      return :missing if reachable && !exists
+      return :failed unless reachable
+
+      uri = URI.parse(database_url)
+      _out, status = Open3.capture2("mysqladmin", *mysql_args(uri), "drop", name, "-f")
+      return :dropped if status.success?
+
+      reachable, exists = mysql_state(name, database_url)
+      reachable && exists ? :failed : :dropped
+    rescue SystemCallError
+      :failed
+    end
+
+    # [server_reachable, database_exists] — the split that lets drop
+    # tell "nothing to drop" apart from "could not reach the server".
+    def pg_state(name, database_url)
+      uri = URI.parse(database_url)
+      out, status = Open3.capture2(pg_env(uri), "psql", "-lqt")
+      return [false, false] unless status.success?
+
+      [true, out.split("\n").any? { |l| l.split("|").first.to_s.strip == name }]
+    rescue SystemCallError
+      [false, false]
+    end
+
+    def mysql_state(name, database_url)
+      uri = URI.parse(database_url)
+      out, status = Open3.capture2("mysql", *mysql_args(uri), "-e", "SHOW DATABASES;")
+      return [false, false] unless status.success?
+
+      [true, out.split("\n").include?(name)]
+    rescue SystemCallError
+      [false, false]
     end
 
     # Create the database if missing. Uses createdb/mysqladmin when

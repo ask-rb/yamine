@@ -546,13 +546,7 @@ module Yamine
       end
 
       def database_template_from_config(resolved)
-        top = resolved.env.is_a?(Hash) ? resolved.env["clear"] : nil
-        from_top = top.is_a?(Hash) ? top["DATABASE_URL"] : nil
-        return from_top if from_top && !from_top.to_s.strip.empty?
-
-        env = resolved.processes.values.map { |e| e["env"] || {} }
-        clear = env.map { |e| e["clear"] || {} }.reduce({}, :merge)
-        clear["DATABASE_URL"]
+        Database.template_for(resolved)
       end
 
       # Schema-load on first boot uses the app's own command when declared

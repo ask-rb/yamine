@@ -893,9 +893,9 @@ module Yamine
         resolved = Resolver.resolve(Dir.pwd)
         name = Database.name_for(Dir.pwd, env: boot_env_name,
           state_dir: ctx.store.dir)
-        template = ENV["DATABASE_URL"]
+        template = drop_template
         unless template && !template.strip.empty?
-          $stderr.puts "Error: set DATABASE_URL (template with host/user; database segment is replaced)."
+          $stderr.puts "Error: no DATABASE_URL template found (ENV or env.clear in config/local.yml)."
           exit 1
         end
         if Database.ensure_exists(name, template)
@@ -917,37 +917,40 @@ module Yamine
           $stderr.puts "Error: worktree #{info["dir"]} still exists. Use --force to drop #{name} anyway."
           exit 1
         end
-        if drop_database(ctx, name)
+        template = drop_template
+        unless template && !template.strip.empty?
+          $stderr.puts "Error: no DATABASE_URL template found (ENV or env.clear in config/local.yml) — cannot reach the server to drop #{name}."
+          exit 1
+        end
+        case Database.drop(name, template)
+        when :dropped
           map.delete(name)
           Database.save_map(ctx.store.dir, map)
           puts "Dropped #{name}."
-        else
-          $stderr.puts "Error: could not drop #{name}."
+        when :missing
+          map.delete(name)
+          Database.save_map(ctx.store.dir, map)
+          puts "#{name} did not exist — nothing to drop (claim removed)."
+        when :failed
+          $stderr.puts "Error: could not drop #{name} — is the database server running? The claim is kept."
           exit 1
         end
       end
 
-      def drop_database(_ctx, name)
-        template = ENV["DATABASE_URL"]
-        return false unless template && !template.strip.empty?
+      # Template for reaching the database server outside of boot:
+      # ENV first, then the app's config (env.clear). Runs from the
+      # main checkout, so the config's own template is the usual source.
+      def drop_template
+        env = ENV["DATABASE_URL"]
+        return env if env && !env.strip.empty?
 
-        case Database.adapter_for(template)
-        when :postgres
-          uri = URI.parse(template)
-          _out, status = Open3.capture2("dropdb", name, env: Database.pg_env(uri))
-          status.success?
-        when :mysql
-          uri = URI.parse(template)
-          args = ["-h", uri.host || "127.0.0.1", "-u",
-                  URI.decode_www_form_component(uri.user || "root")]
-          _out, status = Open3.capture2("mysqladmin", *args, "drop", name, "-f")
-          status.success?
-        else
-          false
-        end
-      rescue SystemCallError
-        false
+        config = Config.load(Dir.pwd)
+        return nil unless config
+
+        Database.template_for(TemplateSource.new(config.env_config, config.processes))
       end
+
+      TemplateSource = Struct.new(:env, :processes)
 
       def boot_env_name
         ENV.fetch("RAILS_ENV", "development")
@@ -974,16 +977,31 @@ module Yamine
             puts "No orphaned worktree databases."
             return
           end
+          template = drop_template
+          unless template && !template.strip.empty?
+            $stderr.puts "Error: no DATABASE_URL template found (ENV or env.clear in config/local.yml) — cannot drop the orphaned databases."
+            exit 1
+          end
+          dropped, missing, failed = [], [], []
           orphaned.each do |name, _info|
-            if drop_database(ctx, name)
-              puts "Dropped orphaned #{name}."
-            else
-              $stderr.puts "Could not drop #{name} — remove manually."
+            case Database.drop(name, template)
+            when :dropped then dropped << name
+            when :missing then missing << name
+            when :failed then failed << name
             end
           end
+          dropped.each { |n| puts "  dropped #{n}" }
+          missing.each { |n| puts "  #{n} did not exist — nothing to drop" }
+          failed.each { |n| warn "  could not drop #{n} — is the server running? Claim kept for a retry." }
+          # Forget only the claims we actually handled; a failed drop
+          # stays recorded so the next clean can retry it.
           map = Database.load_map(ctx.store.dir)
-          orphaned.each_key { |name| map.delete(name) }
+          (dropped + missing).each { |n| map.delete(n) }
           Database.save_map(ctx.store.dir, map)
+          summary = "Cleaned #{orphaned.length} orphaned claim(s): #{dropped.length} dropped, #{missing.length} already gone"
+          summary += ", #{failed.length} failed" if failed.any?
+          puts "#{summary}."
+          exit 1 if failed.any?
         else
           raise Error, "Usage: yamine worktree [list|clean]"
         end

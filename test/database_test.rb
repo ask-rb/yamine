@@ -262,3 +262,115 @@ class DatabaseWarningTest < Minitest::Test
     assert_raises(Yamine::Error) { ctx.parse_flags(["--bogus"], %i[wait json]) }
   end
 end
+
+class DatabaseDropTest < Minitest::Test
+  OK = Struct.new(:success?).new(true)
+  FAIL = Struct.new(:success?).new(false)
+
+  def test_missing_when_server_reachable_and_db_absent
+    Yamine::Database.stubs(:pg_state).returns([true, false])
+    # No dropdb call should even happen.
+    Open3.expects(:capture2).never
+    assert_equal :missing, Yamine::Database.drop("gone", "postgres://u@h/gone")
+  end
+
+  def test_dropped_when_dropdb_succeeds
+    Yamine::Database.stubs(:pg_state).returns([true, true])
+    Open3.stubs(:capture2).returns(["", OK])
+    assert_equal :dropped, Yamine::Database.drop("x", "postgres://u@h/x")
+  end
+
+  def test_failed_when_dropdb_refused_and_db_still_there
+    Yamine::Database.stubs(:pg_state).returns([true, true], [true, true])
+    Open3.stubs(:capture2).returns(["dropdb: database removal failed", FAIL])
+    assert_equal :failed, Yamine::Database.drop("x", "postgres://u@h/x")
+  end
+
+  def test_failed_when_server_unreachable
+    Yamine::Database.stubs(:pg_state).returns([false, false])
+    Open3.expects(:capture2).never
+    assert_equal :failed, Yamine::Database.drop("x", "postgres://127.0.0.1:1/x"),
+      "an unreachable server must not be reported as 'did not exist'"
+  end
+
+  def test_mysql_missing_and_dropped
+    Yamine::Database.stubs(:mysql_state).returns([true, false])
+    assert_equal :missing, Yamine::Database.drop("gone", "mysql2://root@h/gone")
+
+    Yamine::Database.stubs(:mysql_state).returns([true, true])
+    Open3.stubs(:capture2).returns(["", OK])
+    assert_equal :dropped, Yamine::Database.drop("x", "mysql2://root@h/x")
+  end
+
+  def test_unknown_adapter_fails
+    assert_equal :failed, Yamine::Database.drop("x", nil)
+  end
+end
+
+class WorktreeCleanTest < Minitest::Test
+  def setup
+    @orig_dir = Dir.pwd
+    @dir = Dir.mktmpdir
+    @state = Dir.mktmpdir
+    @orig_state = ENV["YAMINE_STATE_DIR"]
+    @orig_url = ENV["DATABASE_URL"]
+    ENV["YAMINE_STATE_DIR"] = @state
+    ENV["DATABASE_URL"] = "postgres://u@127.0.0.1:5432/template"
+    Dir.chdir(@dir)
+  end
+
+  def teardown
+    Dir.chdir(@orig_dir)
+    ENV["YAMINE_STATE_DIR"] = @orig_state
+    ENV["DATABASE_URL"] = @orig_url
+    FileUtils.remove_entry(@dir) rescue nil
+    FileUtils.remove_entry(@state) rescue nil
+  end
+
+  def claim(name, gone_dir)
+    map = Yamine::Database.load_map(@state)
+    map[name] = { "dir" => File.join(@dir, "nowhere", gone_dir) }
+    Yamine::Database.save_map(@state, map)
+  end
+
+  def test_clean_reports_each_outcome_and_keeps_failed_claims
+    claim("wt_a_development", "a")
+    claim("wt_a_test", "a")
+    claim("wt_b_development", "b")
+    Yamine::Database.stubs(:drop).returns(:dropped, :missing, :failed)
+
+    out, err = capture_io do
+      begin
+        Yamine::CLI::SystemCommand.worktree(Yamine::CLI::Context.new, ["clean"])
+      rescue SystemExit
+        nil
+      end
+    end
+    assert_includes out, "dropped wt_a_development"
+    assert_includes out, "wt_a_test did not exist — nothing to drop"
+    assert_includes err, "could not drop wt_b_development"
+    assert_match(/1 dropped, 1 already gone, 1 failed/, out)
+
+    map = Yamine::Database.load_map(@state)
+    refute map.key?("wt_a_development"), "handled claims are forgotten"
+    refute map.key?("wt_a_test"), "missing dbs are forgotten too (nothing to retry)"
+    assert map.key?("wt_b_development"), "a failed drop keeps its claim for a retry"
+  end
+
+  def test_clean_empty_state
+    out, = capture_io do
+      Yamine::CLI::SystemCommand.worktree(Yamine::CLI::Context.new, ["clean"])
+    end
+    assert_includes out, "No orphaned worktree databases."
+  end
+
+  def test_db_drop_reports_missing_not_error
+    claim("ghost_development", "ghost")
+    Yamine::Database.stubs(:drop).returns(:missing)
+    out, = capture_io do
+      Yamine::CLI::SystemCommand.db_drop(Yamine::CLI::Context.new, ["ghost_development"])
+    end
+    assert_includes out, "did not exist — nothing to drop"
+    refute Yamine::Database.load_map(@state).key?("ghost_development")
+  end
+end
