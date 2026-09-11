@@ -46,8 +46,12 @@ module Yamine
       end
 
       def run_named(ctx, name, _args)
-        $stderr.puts "Error: `yamine #{name}` is no longer supported."
-        $stderr.puts "  All processes come from config/local.yml. Run `yamine init` to create one."
+        if name.to_s.start_with?("-")
+          $stderr.puts "Error: unknown flag `#{name}`. Try `yamine --help` or `yamine start --help`."
+        else
+          $stderr.puts "Error: `yamine #{name}` is no longer supported."
+          $stderr.puts "  All processes come from config/local.yml. Run `yamine init` to create one."
+        end
         exit 1
       end
 
@@ -298,20 +302,32 @@ module Yamine
       # Compares our worktree dir (spec.dir) against the owner's: same
       # dir + same agent is a restart, anything else names the owner.
       def check_worktree_ownership!(ctx, resolved, force:)
+        return if force
+
         mine = Agent.name
         here = File.expand_path(Dir.pwd)
+        # Stale pids (agent died, worktree deleted) must not block a restart.
+        ctx.store.prune_stale
         Resolver.hostnames(resolved).each do |hostname|
           entry = ctx.store.find(hostname)
           next unless entry
           next unless entry["pid"] != 0 && ProxyControl.pid_alive?(entry["pid"])
           next if entry["agent"] == mine && entry.dig("spec", "dir") == here
-          next if force
 
           owner = entry["agent"] && !entry["agent"].empty? ? "agent #{entry["agent"].inspect}" : "PID #{entry["pid"]}"
           dir = entry.dig("spec", "dir")
-          $stderr.puts "Error: #{hostname} is live and owned by #{owner}#{dir ? " (#{dir})" : ""}."
-          $stderr.puts "  Work in your own worktree (each branch gets its own URL), or take over explicitly:"
-          $stderr.puts "    yamine start --force"
+          same_agent = entry["agent"] == mine
+          same_dir = entry.dig("spec", "dir") == here
+          if same_agent && !same_dir
+            $stderr.puts "Error: #{hostname} was started from a different directory by the same agent #{mine.inspect}:"
+            $stderr.puts "  running: #{dir || "(unknown)"}"
+            $stderr.puts "  current: #{here}"
+            $stderr.puts "  Stop the other instance first (`yamine stop` there) or take over explicitly:"
+          else
+            $stderr.puts "Error: #{hostname} is live and owned by #{owner}#{dir ? " (#{dir})" : ""}."
+            $stderr.puts "  Work in your own worktree (each branch gets its own URL), or take over explicitly:"
+          end
+          $stderr.puts "    yamine start --force   (or bare `yamine --force`)"
           exit 1
         end
       end

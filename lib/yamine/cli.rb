@@ -25,8 +25,20 @@ module Yamine
 
     def run(argv)
       args = argv.dup
-      if args.empty? || (!SUBCOMMANDS.include?(args.first) && !args.first.start_with?("-"))
+      if args.empty?
         return BootCommand.run_inferred(Context.new, args)
+      end
+      # --help / --version are handled by `help` below, not by boot.
+      if args.first&.start_with?("-")
+        first = args.first.to_s
+        if %w[--help -h --version -v].include?(first)
+          return help if %w[--help -h].include?(first)
+          return (puts "yamine #{VERSION}"; 0) if %w[--version -v].include?(first)
+        end
+        return BootCommand.run_inferred(Context.new, args)
+      end
+      unless SUBCOMMANDS.include?(args.first)
+        return BootCommand.run_named(Context.new, args.first, args[1..])
       end
 
       cmd = args.shift

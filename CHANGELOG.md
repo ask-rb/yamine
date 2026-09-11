@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.10.3] — 2026-09-11
+
+### Added
+
+- **`yamine start` waits by default** (was opt-in `--wait`). Every HTTP
+  process is spawned concurrently, each `healthcheck: { path: /up,
+  timeout: 30 }` or TCP accept is polled, and routes are registered only
+  when all are healthy (`ready:` + `WaitPayload` with `--json`). On
+  failure everything spawned (including background children) is killed and
+  the CLI exits 1 with the failed process's own `log/yamine-<name>.log`
+  tail and no half-booted routes. `--wait` is kept as a no-op alias;
+  `--no-wait` restores the old sequential fire-and-forget path.
+- `Yamine::Readiness` phased events (`phase`/`action`/`status`/
+  `duration_ms`/`detail`), `check_deps` pre-flight, `wait_healthy`
+  (healthcheck path or TCP accept), concurrent `wait_all` (one thread per
+  process, dead-PID short-circuit), per-phase timeouts (deps 30s, db 15s,
+  schema 90s, process 45s or per-healthcheck). `Yamine::WaitPayload`
+  success/failure payloads. `Runner#spawn_http`/`adopt`/`spawned?`, `boot_run`
+  output is logged and `Database.exists?` splits from `ensure_exists` for
+  provenance without a second probe.
+- Top-level `db: false` opts out of per-worktree databases (validated
+  boolean-or-mapping, `x-` extensions still ignored), `db.schema_load`
+  moves to top-level `db`. Template discovery checks `ENV` then top-level
+  `env.clear` then per-process `env.clear`.
+
+### Fixed
+
+- **`yamine --force` (and bare `yamine --wait`/`--no-wait`) no longer hits
+  the "no longer supported" error.** Boot-flag dispatch now routes bare
+  `yamine --flag` to `run_inferred` instead of the legacy single-name
+  path, and `--help`/`--version` are handled before boot. `run_named`
+  now guides `unknown flag \`--flag\`` toward `--help`.
+- **`yamine` no longer wastes a 2s health wait before reporting the
+  ownership conflict.** The conflict you hit (`"anywaye.localhost" is
+  already registered by a running agent "kaka@...` + stale background
+  jobs already spawned) now fails before any spawn, `prune_stale` discards
+  crashed state, and the message distinguishes same-agent-different-dir
+  ("stop the other instance") from foreign agent ("work in your own
+  worktree"). Guidance now says `yamine start --force   (or bare \`yamine
+  --force\`)`.
+- **Credentials-only `DATABASE_URL`s no longer share silently.** When no
+  template exists but `database.yml`/`Gemfile` proves server-backed, boot
+  warns loudly with the `env.clear` + `local.secrets` fix. Injection is
+  still `DATABASE_URL`, no `ask-auth` dep, no Rails load at boot.
+
 ## [0.10.2] — 2026-09-10
 
 ### Added
