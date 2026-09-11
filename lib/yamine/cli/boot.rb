@@ -241,7 +241,8 @@ module Yamine
           app = runner.boot_run(name: item[:name], hostname: item[:hostname],
             url: item[:url], dir: Dir.pwd, command: item[:command],
             port: item[:port], force: opts[:force],
-            rails_dev_host: item[:hostname], database_url: db_url)
+            rails_dev_host: item[:hostname], database_url: db_url,
+            extra_env: build_env(resolved, item[:entry], proc_name: item[:name]))
           routes_registered << { hostnames: item[:hostnames], app: app }
 
           say opts, "  -> #{item[:url]}"
@@ -261,7 +262,8 @@ module Yamine
           app = runner.spawn_http(name: item[:name], hostname: item[:hostname],
             url: item[:url], dir: Dir.pwd, command: item[:command],
             port: item[:port], rails_dev_host: item[:hostname],
-            database_url: db_url, force: opts[:force])
+            database_url: db_url, force: opts[:force],
+            extra_env: build_env(resolved, item[:entry], proc_name: item[:name]))
           # Tracked before registration so any later failure (a raise
           # during adopt, a crash while another process waits) can
           # always reap it. Duplicate names in named_pids are harmless.
@@ -359,7 +361,8 @@ module Yamine
         app = runner.boot_run(name: proc_name, hostname: "#{resolved.app}.#{proc_name}.internal",
           url: url, dir: Dir.pwd, command: ["sh", "-c", cmd], port: port,
           force: opts[:force], rails_dev_host: nil, register: false,
-          database_url: db_url)
+          database_url: db_url,
+          extra_env: build_env(resolved, entry, proc_name: proc_name))
         children << { name: proc_name, pid: app.pid }
         say opts, "  [#{proc_name}] background (pid #{app.pid})"
       end
@@ -398,18 +401,44 @@ module Yamine
         end
       end
 
-      def build_env(ctx, resolved, entry)
+      # The environment a process gets, from the config.
+      #
+      # Two levels, and the merge order is the point: top-level `env:`
+      # describes the whole app (an API URL every process needs), a
+      # process's own `env:` describes that process, and the process wins
+      # where they collide — "this one worker talks to staging" should not
+      # require restructuring the file.
+      #
+      # `env.clear` is literal values; `env.secret` names keys whose values
+      # come from config/local.secrets (dotenv, gitignored), so a credential
+      # stays out of the config file while still reaching the process. A
+      # named secret that is missing is reported rather than silently
+      # dropped: an app booting with a blank API key fails later, somewhere
+      # far less obvious.
+      def build_env(resolved, entry, proc_name: nil)
         env = {}
-        # Merge config env.clear
-        config_env = resolved.secrets || {}
+
+        top = resolved.env.is_a?(Hash) ? resolved.env : {}
+        (top["clear"] || {}).each { |k, v| env[k] = v }
+
         entry_env = entry["env"] || {}
         (entry_env["clear"] || {}).each { |k, v| env[k] = v }
-        # Merge secrets from config/local.secrets
-        secret_keys = entry_env["secret"] || []
-        secret_keys.each do |k|
-          env[k] = config_env[k] if config_env.key?(k)
+
+        secrets = resolved.secrets || {}
+        (Array(top["secret"]) + Array(entry_env["secret"])).uniq.each do |key|
+          if secrets.key?(key)
+            env[key] = secrets[key]
+          elsif ENV.key?(key)
+            # Already in the environment (a shell export, an agent's
+            # session) — the declaration is satisfied.
+            env[key] = ENV[key]
+          else
+            label = proc_name ? "#{proc_name}: " : ""
+            $stderr.puts "  #{label}warning: env.secret lists #{key}, but it is not in " \
+                         "config/local.secrets (and not in the environment) — starting without it"
+          end
         end
-        # Host env (dotenv from .env) already in ENV
+
         env
       end
 

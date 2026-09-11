@@ -93,11 +93,16 @@ module Yamine
     # register: false spawns without a route (background processes).
     # Child output goes to log/yamine-<name>.log so `--wait` failure
     # payloads can tail it (same file the managed path uses).
+    #
+    # extra_env is the config's env.clear/env.secret for this process —
+    # yamine's own keys (PORT, YAMINE_URL, DATABASE_URL, the TLS vars)
+    # win over it, because those describe the boot rather than the app.
     def boot_run(name:, hostname:, url:, dir:, command:, port: nil, force: false,
-      rails_dev_host: nil, register: true, database_url: nil, spec: nil)
+      rails_dev_host: nil, register: true, database_url: nil, spec: nil,
+      extra_env: nil)
       port ||= Ports.find_free
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
-        database_url: database_url)
+        database_url: database_url, extra_env: extra_env)
       path = log_path(dir, name)
       pid = with_clean_env { spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
       Process.detach(pid)
@@ -124,9 +129,9 @@ module Yamine
     # Returns the placeholder App (target known before bind). Fate of
     # the backend is decided by wait, not by spawn.
     def spawn_http(name:, hostname:, url:, dir:, command:, port:, rails_dev_host: nil,
-      database_url: nil, force: false)
+      database_url: nil, force: false, extra_env: nil)
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
-        database_url: database_url)
+        database_url: database_url, extra_env: extra_env)
       path = log_path(dir, name)
       pid = with_clean_env { spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
       Process.detach(pid)
@@ -151,8 +156,12 @@ module Yamine
       false
     end
 
-    def child_env(dir, url:, port:, rails_dev_host: nil, database_url: nil)
-      env = { "YAMINE_URL" => url }
+    def child_env(dir, url:, port:, rails_dev_host: nil, database_url: nil, extra_env: nil)
+      # The config's own variables first, so everything below overrides
+      # them: PORT, YAMINE_URL, DATABASE_URL, and the TLS paths describe
+      # *this boot* and must not be lost to a stray key in local.yml.
+      env = (extra_env || {}).transform_keys(&:to_s).transform_values(&:to_s)
+      env["YAMINE_URL"] = url
       env["PORT"] = port.to_s if port
       env["HOST"] = "127.0.0.1"
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.11.1] — 2026-09-11
+
+### Fixed
+
+- **`env:` in `config/local.yml` now actually reaches the processes.**
+  It never did. `build_env` was written, correct-looking, and had no
+  callers — so every top-level `env.clear` value and every `env.secret`
+  was parsed, validated, and dropped on the floor. It stayed invisible
+  because `DATABASE_URL` had its own path to the child; a config whose
+  *integration* depended on that block booted with the variable blank,
+  which looks exactly like a code bug.
+
+  Found while wiring a Rails app to a sibling service at
+  `https://other-app.localhost`: the URL was in `config/local.yml`, the
+  process had `nil`.
+
+  Both levels now merge, process over top-level, with `env.secret` names
+  resolved from `config/local.secrets` (or an existing export). A declared
+  secret nobody supplies warns at boot instead of starting blank — an app
+  with a missing API key fails somewhere far less obvious later.
+
+  yamine's own variables (`PORT`, `YAMINE_URL`, `DATABASE_URL`, the TLS
+  paths) are applied *after* the config, so a stray key in `local.yml`
+  cannot steer a process off its route. Pinned end to end by a test that
+  spawns a real process and reads the value out of its environment —
+  asserting on `build_env`'s return would have passed on the broken
+  version too.
+
 ## [0.11.0] — 2026-09-11
 
 ### Added
