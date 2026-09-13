@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.14.0] — 2026-09-13
+
+### Added
+
+- **yamine now owns the worktree lifecycle, from `add` to `clean`.**
+  It already gave every linked worktree its own URL, database, and
+  routes; it just never managed the worktree itself. Creating one meant
+  a manual `git worktree add`, re-creating the gitignored config by
+  hand, a bundle install, and a first boot that discovered everything
+  the hard way — and cleanup was hand-run `git worktree remove` with
+  routes, databases, and hosts entries left to rot.
+
+  `yamine worktree add <name>` creates the worktree beside the repo
+  (branch = name), copies `config/local.yml` and
+  `config/local.secrets` — the gitignored per-checkout files git does
+  not carry and the single largest follow-up cost — runs
+  `bundle install`, pre-creates the per-worktree database with schema,
+  and prints the URL the worktree will serve. `yamine worktree remove
+  <name>` is the full teardown of one worktree: stop its backends,
+  remove its routes, drop its database, `git worktree remove`, delete
+  the branch. `yamine worktree clean [--all] [--dry-run]` is the
+  done-and-merged sweep: full teardown of every merged worktree plus
+  the old orphan sweep, `list` shows every worktree with its database,
+  dirty, and merged status.
+
+  The safety rails are load-bearing: the main checkout is never a
+  candidate; `clean` never touches a worktree with uncommitted changes
+  (and disregards only the config yamine itself copied, so a fresh
+  worktree is not born dirty); branches go with `git branch -d`, so
+  `clean --all` may remove an unmerged worktree but never its branch —
+  only `remove --force` discards changes or unmerged refs; a failed
+  database drop aborts before the directory is touched, keeping the
+  claim for a retry. A sqlite or template-less app needs no server
+  drop, so its claims are forgotten instead of failing forever — the
+  same honesty 0.13.1 gave postgres, extended to the apps that never
+  had a server to begin with.
+
 ## [0.13.2] — 2026-09-12
 
 ### Fixed

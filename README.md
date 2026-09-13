@@ -158,6 +158,32 @@ A variant is a hostname label, not a config file. Only an explicit
 branch named like a file on disk cannot change your config by accident.
 `yamine status` prints both lines so the two are never confused.
 
+## Worktree lifecycle
+
+yamine owns a worktree from creation to removal:
+
+```bash
+yamine worktree add feature/login    # worktree + config + database, ready to boot
+yamine worktree list                 # every worktree: db, dirty, merged
+yamine worktree remove feature/login # stop, drop db, remove worktree
+yamine worktree clean                # tear down everything already merged
+```
+
+`add` lands the worktree beside the repo, copies the gitignored
+per-checkout config (`config/local.yml`, `config/local.secrets`) the
+branch needs, runs `bundle install`, and pre-creates the per-worktree
+database with schema — the next step is just `yamine start` in it.
+
+`clean` is the done-and-merged sweep: it tears down every worktree
+whose branch is merged (stop, drop database, remove worktree, delete
+branch) and forgets claims of directories that no longer exist. It
+never touches a worktree with uncommitted changes, and unmerged
+branches survive every path except `remove --force` — `git branch -d`
+refuses to delete what git has not seen merged, so a wrong merge
+detection cannot lose a branch. `--all` includes clean-but-unmerged
+worktrees (the branch stays); `--dry-run` prints the plan; `remove
+--force` is the only command that discards uncommitted changes.
+
 ```bash
 yamine                                          # -> https://myapp.localhost
 yamine --service api                            # -> https://api.myapp.localhost
@@ -202,7 +228,7 @@ yamine trust                  # add local CA to system trust store
 yamine clean                  # remove state and hosts entries
 yamine prune                  # remove stale routes
 yamine db list|create|drop    # per-worktree databases
-yamine worktree list|clean    # worktree databases + orphan cleanup
+yamine worktree list|add|remove|clean   # worktree lifecycle
 yamine stop                   # stop this app's backend + routes
 yamine restart                # touch tmp/restart.txt (managed apps reboot)
 yamine log [-f] [n]           # tail (or follow) this app's backend log

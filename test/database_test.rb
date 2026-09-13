@@ -341,7 +341,7 @@ class WorktreeCleanTest < Minitest::Test
 
     out, err = capture_io do
       begin
-        Yamine::CLI::SystemCommand.worktree(Yamine::CLI::Context.new, ["clean"])
+        Yamine::CLI::WorktreeCommand.run(Yamine::CLI::Context.new, ["clean"])
       rescue SystemExit
         nil
       end
@@ -349,7 +349,7 @@ class WorktreeCleanTest < Minitest::Test
     assert_includes out, "dropped wt_a_development"
     assert_includes out, "wt_a_test did not exist — nothing to drop"
     assert_includes err, "could not drop wt_b_development"
-    assert_match(/1 dropped, 1 already gone, 1 failed/, out)
+    assert_match(/Cleaned 3 item\(s\), 1 failed/, out)
 
     map = Yamine::Database.load_map(@state)
     refute map.key?("wt_a_development"), "handled claims are forgotten"
@@ -359,9 +359,9 @@ class WorktreeCleanTest < Minitest::Test
 
   def test_clean_empty_state
     out, = capture_io do
-      Yamine::CLI::SystemCommand.worktree(Yamine::CLI::Context.new, ["clean"])
+      Yamine::CLI::WorktreeCommand.run(Yamine::CLI::Context.new, ["clean"])
     end
-    assert_includes out, "No orphaned worktree databases."
+    assert_includes out, "Nothing to clean."
   end
 
   def test_db_drop_reports_missing_not_error

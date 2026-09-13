@@ -98,6 +98,26 @@ Only an explicit variant ever looks for an overlay file — a branch name
 that happens to match one on disk is ignored. `yamine status` shows
 `variant:` and `overlay:` separately.
 
+## Worktree lifecycle
+
+```bash
+yamine worktree add feature/login   # create + make bootable
+yamine worktree list                # branch, dir, db, dirty/merged
+yamine worktree remove feature/login
+yamine worktree clean [--dry-run]
+```
+
+`add` creates the git worktree beside the repo, copies the gitignored
+per-checkout config (`config/local.yml`, `config/local.secrets`), runs
+`bundle install`, and pre-creates the per-worktree database — then boot
+with `yamine start` inside it. `clean` tears down every worktree whose
+branch is merged (stops backends, drops the database, removes the
+worktree, deletes the branch) and forgets claims of directories that
+vanished. It never touches uncommitted work; unmerged branches survive
+everything except `remove --force`. Prefer `clean --dry-run` first, and
+`clean` over `rm -rf` — a removed worktree leaves no routes, database,
+or stale hosts entries behind.
+
 ## Subdomains are opt-in
 
 A route answers its exact hostname. `*.myapp.localhost` reaches the app

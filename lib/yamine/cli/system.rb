@@ -955,57 +955,6 @@ module Yamine
       def boot_env_name
         ENV.fetch("RAILS_ENV", "development")
       end
-
-      # Worktree helpers: list claimed databases with liveness, clean
-      # drops databases whose worktree dirs are gone.
-      def worktree(ctx, args)
-        sub = args.first
-        case sub
-        when "list", nil
-          map = Database.load_map(ctx.store.dir)
-          if map.empty?
-            puts "No worktree databases claimed yet."
-            return
-          end
-          map.each do |name, info|
-            alive = File.directory?(info["dir"]) ? "alive" : "gone"
-            puts "  #{name}  #{info["dir"]}  (#{alive})"
-          end
-        when "clean"
-          orphaned = Database.orphaned(ctx.store.dir)
-          if orphaned.empty?
-            puts "No orphaned worktree databases."
-            return
-          end
-          template = drop_template
-          unless template && !template.strip.empty?
-            $stderr.puts "Error: no DATABASE_URL template found (ENV or env.clear in config/local.yml) — cannot drop the orphaned databases."
-            exit 1
-          end
-          dropped, missing, failed = [], [], []
-          orphaned.each do |name, _info|
-            case Database.drop(name, template)
-            when :dropped then dropped << name
-            when :missing then missing << name
-            when :failed then failed << name
-            end
-          end
-          dropped.each { |n| puts "  dropped #{n}" }
-          missing.each { |n| puts "  #{n} did not exist — nothing to drop" }
-          failed.each { |n| warn "  could not drop #{n} — is the server running? Claim kept for a retry." }
-          # Forget only the claims we actually handled; a failed drop
-          # stays recorded so the next clean can retry it.
-          map = Database.load_map(ctx.store.dir)
-          (dropped + missing).each { |n| map.delete(n) }
-          Database.save_map(ctx.store.dir, map)
-          summary = "Cleaned #{orphaned.length} orphaned claim(s): #{dropped.length} dropped, #{missing.length} already gone"
-          summary += ", #{failed.length} failed" if failed.any?
-          puts "#{summary}."
-          exit 1 if failed.any?
-        else
-          raise Error, "Usage: yamine worktree [list|clean]"
-        end
-      end
     end
   end
 end

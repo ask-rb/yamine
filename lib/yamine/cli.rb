@@ -60,7 +60,7 @@ module Yamine
       when "init" then SystemCommand.init(ctx, args)
       when "start" then SystemCommand.start(ctx, args)
       when "db" then SystemCommand.db(ctx, args)
-      when "worktree" then SystemCommand.worktree(ctx, args)
+      when "worktree" then WorktreeCommand.run(ctx, args)
       when "kamal" then SystemCommand.kamal(ctx, args)
       when "stop"
         exit RoutesCommand.stop(ctx, args)
@@ -96,7 +96,7 @@ module Yamine
           yamine clean                  Remove state and hosts entries
           yamine prune                  Remove stale routes
           yamine db list|create|drop      Per-worktree databases
-          yamine worktree list|clean     Worktree databases + orphan cleanup
+          yamine worktree list|add|remove|clean   Worktrees: create, inspect, full cleanup
           yamine proxy start|stop       Control the proxy
           yamine service install|status|uninstall   OS startup service
           yamine sudoers                Print scoped passwordless-sudo rules for port 443
