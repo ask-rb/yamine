@@ -134,8 +134,8 @@ case) need `yamine hosts sync`.
 
 | Axis | Example | Source |
 |---|---|---|
-| app | `myapp` | inferred, `--name`, `yamine.json`, `YAMINE_NAME` |
-| service | `api.myapp` | `--service`, `YAMINE_SERVICE` (`web` stays bare) |
+| app | `myapp` | `service:` in `config/local.yml` (`yamine init` infers it) |
+| service | `api.myapp` | a non-web process name (every `proxy: true` process but `web`) |
 | variant | `fix-ui.myapp` | `--variant`, `YAMINE_VARIANT`, linked worktree branch |
 | tld | `myapp.preview.example.com` | `--tld` (default `localhost`) |
 
@@ -186,7 +186,6 @@ worktrees (the branch stays); `--dry-run` prints the plan; `remove
 
 ```bash
 yamine                                          # -> https://myapp.localhost
-yamine --service api                            # -> https://api.myapp.localhost
 yamine --variant demo                           # -> https://demo.myapp.localhost
 yamine --tld preview.example.com                # your own domain (OAuth parity)
 ```
@@ -217,7 +216,6 @@ to start it. `yamine status` reports which mode an app is in.
 yamine                        # boot app (waits until healthy, then supervises)
 yamine start --no-wait        # fire-and-forget (register routes immediately)
 yamine start --json           # machine-readable wait result (--wait default)
-yamine run -- <cmd>           # run explicit command through proxy
 yamine get <name>             # print URL for cross-service wiring
 yamine alias <name> <port>    # static route (e.g. Docker)
 yamine list [--json]          # show active routes (+ backend liveness)
@@ -244,18 +242,13 @@ OAuth callbacks, mailer hosts, webhook URLs), `PORT`, and `HOST`.
 ## Frameworks
 
 Rails and bare Rack (`config.ru`) boot managed on a unix socket (Puma
-when available; `rackup` on TCP otherwise). `Procfile.dev`/`bin/dev`,
-Jekyll, Bridgetown, and Middleman run in run mode with `PORT` injected
-(port-ignoring CLIs get explicit `--port/--host` flags). Anything else:
-`yamine run -- <cmd>`.
+when available; `rackup` on TCP otherwise). Port-ignoring CLIs —
+Jekyll, Bridgetown, Middleman — get explicit `--port/--host` flags
+injected at boot; everything else comes from `processes:` in
+`config/local.yml`, one process per entry.
 
-```bash
-yamine --proc web             # boot a specific Procfile process
-yamine --proc worker          # (first line is the default)
-```
-
-Procfile lines that are compound (`&&`, `||`, `|`, `;`) are refused with
-guidance rather than silently mis-injected.
+Process commands that are compound (`&&`, `||`, `|`, `;`) are refused
+with guidance rather than silently mis-injected.
 
 For Rails integration (hosts, Action Cable origins, Procfile rewrite,
 generators) — deprecated; core covers Rails now.

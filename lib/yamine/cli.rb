@@ -81,11 +81,9 @@ module Yamine
         yamine - Stable named .localhost URLs for Ruby development.
 
         Usage:
-          yamine start [name] [cmd...]  One-setup-and-go: setup if needed, then boot -> https://<app>.localhost
+          yamine start                 One-setup-and-go: setup if needed, then boot -> https://<app>.localhost
           yamine setup                One-shot workstation setup without booting (run once)
-          yamine                        Bare form of `start` -> https://<app>.localhost
-          yamine run [cmd]              Same, with explicit command
-          yamine <name> <cmd>           Run with explicit name
+          yamine                        Bare form of `start` — boots every process in config/local.yml
           yamine get <name>             Print URL for a service
           yamine alias <name> <port>    Static route (e.g. Docker)
           yamine list                   Show active routes (+ backend liveness)
@@ -106,8 +104,8 @@ module Yamine
           yamine restart                Touch tmp/restart.txt
           yamine log [-f] [n]           Tail (or follow) this app's backend log
 
-        Flags: --variant, --tld, --force, --app-port, --wait (default), --no-wait, --json
-        Env: YAMINE_NAME/SERVICE/VARIANT/TLD/PORT/STATE_DIR, YAMINE_BRANCH=1
+        Flags: --variant, --tld, --force, --app-port, --wait (default), --no-wait, --json, --branch
+        Env: YAMINE_VARIANT/TLD/PORT/STATE_DIR/AGENT, YAMINE_BRANCH=1
       HELP
     end
 
