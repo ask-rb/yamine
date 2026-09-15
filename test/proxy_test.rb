@@ -147,4 +147,56 @@ class ProxyLiveTest < Minitest::Test
     server&.close
     FileUtils.remove_entry(dir) if dir
   end
+
+  # ActionCable authenticates a WebSocket by comparing the Origin header
+  # against the request's scheme (X-Forwarded-Proto) + Host. Upgrades used
+  # to be piped verbatim, so a wss:// connection reached the app with no
+  # forwarded scheme and was refused as a cross-origin request.
+  def test_upgrade_forwards_headers_and_pipes_bytes
+    backend = TCPServer.new("127.0.0.1", 0)
+    backend_port = backend.addr[1]
+    received = Queue.new
+    Thread.new do
+      sock = backend.accept
+      head = +""
+      head << sock.gets while head !~ /\r\n\r\n\z/
+      received << head
+      sock.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+      sock.write("hello-ws")
+      sock.close
+    end
+
+    dir = Dir.mktmpdir
+    store = Yamine::RouteStore.new(dir)
+    store.add_route("myapp.localhost", "127.0.0.1:#{backend_port}", 0, kind: "tcp")
+
+    proxy = Yamine::Proxy.new(store: store, port: 0, tls: false)
+    server = TCPServer.new("127.0.0.1", 0)
+    proxy_port = server.addr[1]
+    Thread.new do
+      sock = server.accept
+      proxy.send(:handle, sock)
+    end
+
+    sock = TCPSocket.new("127.0.0.1", proxy_port)
+    sock.write("GET /cable HTTP/1.1\r\nHost: myapp.localhost\r\n" \
+      "Connection: Upgrade\r\nUpgrade: websocket\r\n" \
+      "Origin: https://myapp.localhost\r\n" \
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+    response = sock.read
+    assert_includes response, "101 Switching Protocols"
+    assert_includes response, "hello-ws"
+
+    head = received.pop
+    assert_includes head, "GET /cable HTTP/1.1"
+    assert_includes head, "upgrade: websocket"
+    assert_includes head, "sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ=="
+    assert_includes head, "x-forwarded-proto: http"
+    assert_includes head, "x-forwarded-host: myapp.localhost"
+    assert_includes head, "x-forwarded-for: 127.0.0.1"
+  ensure
+    backend&.close
+    server&.close
+    FileUtils.remove_entry(dir) if dir
+  end
 end

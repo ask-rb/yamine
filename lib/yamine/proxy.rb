@@ -320,12 +320,18 @@ module Yamine
 
     def handle_upgrade(sock, head, buf)
       routes = cached_routes
-      _method, _target, headers = parse_head(head)
+      method, target, headers = parse_head(head)
       entry = route(headers["host"].to_s, routes)
       return unless entry
 
+      # Upgrades carry the same forwarded headers as every other request:
+      # an app behind the proxy (ActionCable's origin check) reads the
+      # scheme from X-Forwarded-Proto, and a verbatim head would tell a
+      # wss:// connection it arrived as http.
+      set_forwarded(headers, sock, tls: @tls)
+
       backend = dial(entry)
-      backend.write(head)
+      backend.write(rebuild_head(method, target, headers))
       backend.write(buf) unless buf.empty?
       pipe_both(sock, backend)
     rescue SystemCallError, OpenSSL::SSL::SSLError, IOError => e
