@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.14.3] — 2026-09-15
+
+### Fixed
+
+- **WebSocket upgrades carry the same forwarded headers as every other
+  request.** Upgrade requests (ActionCable, Turbo Streams over cable)
+  were piped to the backend byte-for-byte, so `X-Forwarded-Proto`,
+  `X-Forwarded-For`, and `X-Forwarded-Host` never arrived — the one
+  request class that skipped `set_forwarded`. An app behind the proxy
+  then saw a `wss://` connection as plain `http`, and Rails' ActionCable
+  origin check (Origin vs. scheme + Host) compared
+  `https://app.localhost` against `http://app.localhost` and refused the
+  socket with "Request origin not allowed". Upgrades now run the same
+  `set_forwarded` path as every other request before the head is
+  forwarded; the bytes after the header block still pipe raw.
+
 ## [0.14.2] — 2026-09-15
 
 ### Added
