@@ -10,7 +10,7 @@ module Yamine
   # In non-interactive environments (no TTY or CI=1) we fail early with
   # a clear message instead of prompting (portless lesson).
   class CLI
-    SUBCOMMANDS = %w[run get alias hosts list doctor trust clean prune proxy service sudoers kamal stop restart log status open setup start init db worktree].freeze
+    SUBCOMMANDS = %w[get alias hosts list doctor trust clean prune proxy service sudoers kamal stop restart log status open setup start init db worktree].freeze
 
     def self.run(argv)
       new.run(argv)
@@ -44,7 +44,6 @@ module Yamine
       cmd = args.shift
       ctx = Context.new
       case cmd
-      when "run" then BootCommand.run_explicit(ctx, args)
       when "get" then RoutesCommand.get(ctx, args)
       when "alias" then RoutesCommand.alias_add(ctx, args)
       when "hosts" then SystemCommand.hosts(ctx, args)

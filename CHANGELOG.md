@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.1] — 2026-09-13
+
+### Removed
+
+- **`yamine run` has been removed.** `run` was an alias of `start` since
+  the config-first rewrite but kept its old help text, and the
+  compound-line error advice still pointed at `yamine run -- <cmd>` —
+  a command that silently ignores its argument. The subcommand now
+  prints the migration message every other removed command uses ("all
+  processes come from config/local.yml"), and the advice rewrites to
+  what is actually true: split the command into its own process in
+  config, or wrap it in a script. One-off routed commands (Docker,
+  ad-hoc ports) go through `yamine alias`, which gives them a hostname
+  without yamine owning the process lifecycle.
+
 ## [0.14.0] — 2026-09-13
 
 ### Added

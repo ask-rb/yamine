@@ -42,10 +42,6 @@ module Yamine
         opts[:json] ? $stderr.puts(message) : puts(message)
       end
 
-      def run_explicit(ctx, args)
-        run_inferred(ctx, args)
-      end
-
       def run_named(ctx, name, _args)
         if name.to_s.start_with?("-")
           $stderr.puts "Error: unknown flag `#{name}`. Try `yamine --help` or `yamine start --help`."
@@ -217,7 +213,7 @@ module Yamine
           url = Hostname.url(hostname, port: ctx.proxy_port, tls: ctx.proxy_tls)
           cmd = entry["cmd"].to_s
           if cmd.match?(Yamine::Procfile::COMPOUND)
-            $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — run explicitly: yamine run -- #{cmd}"
+            $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — split it into separate processes, or wrap in a script and point cmd: at it"
             next
           end
           port = opts[:app_port] || Ports.find_free
@@ -356,7 +352,7 @@ module Yamine
       def boot_background(ctx, runner, resolved, proc_name, entry, opts, children, db_url)
         cmd = entry["cmd"].to_s
         if cmd.match?(Yamine::Procfile::COMPOUND)
-          $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — run explicitly: yamine run -- #{cmd}"
+          $stderr.puts "  [#{proc_name}] ERROR: compound line (&&, ||, |, ;) — split it into separate processes, or wrap in a script and point cmd: at it"
           return
         end
         port = opts[:app_port] || Ports.find_free
