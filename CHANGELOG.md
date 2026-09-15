@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.14.2] — 2026-09-15
+
+### Added
+
+- **`yamine skills install` — one command into your harness's local skills
+  directory.** With `ask-skills` / `ask-agent` the bundled yamine skill
+  at `lib/ask/skills/yamine/SKILL.md` is auto-discovered. Without them,
+  most harnesses (including ZCode) already discover
+  `~/.agents/skills/` — this command copies there so nobody has to find
+  the gem path by hand: `yamine skills install` (global default),
+  `yamine skills install --local` (per-project), `yamine skills
+  install --dir <path>` (anywhere), with `uninstall` symmetric. The gem
+  now auto-updates that copy: the installed skill is marked with
+  `.yamine-managed` and every `yamine <anything>` silently refreshes it
+  when the bundled version differs — hand-copied skills are never
+  touched.
+
 ## [0.14.1] — 2026-09-13
 
 ### Removed
