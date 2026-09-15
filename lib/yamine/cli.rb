@@ -24,6 +24,7 @@ module Yamine
     end
 
     def run(argv)
+      SkillsCommand.auto_sync rescue nil
       args = argv.dup
       if args.empty?
         return BootCommand.run_inferred(Context.new, args)

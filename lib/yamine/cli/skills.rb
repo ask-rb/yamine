@@ -16,6 +16,22 @@ module Yamine
       SKILL_NAME = "yamine"
       SOURCE_REL = "ask/skills/yamine/SKILL.md"
 
+      # Keeps installed copies in sync after `gem update yamine`. Called
+      # once per yamine invocation, silently, before the subcommand runs.
+      # Only touches copies that were created by `yamine skills install`
+      # (identified by the marker file next to SKILL.md) so a hand-copied
+      # or hand-edited skill is never overwritten. Failures are swallowed
+      # — a stale skill is better than a broken boot.
+      def auto_sync
+        candidates.each do |dest|
+          next unless File.file?(dest)
+          next unless managed?(dest)
+          sync_copy(dest)
+        end
+      rescue StandardError
+        nil
+      end
+
       def run(_ctx, args)
         sub = args.shift
         if sub == "--help" || sub == "-h" || sub.nil?
@@ -46,6 +62,7 @@ module Yamine
         end
         FileUtils.mkdir_p(File.dirname(dest))
         FileUtils.cp(source, dest)
+        stamp(dest)
         puts "Installed yamine skill -> #{dest}"
         if opts[:dir].nil? && !opts[:local]
           collisions = other_skill_dirs(opts)
@@ -65,6 +82,7 @@ module Yamine
         dest = target_dirs(opts).first
         if File.file?(dest)
           FileUtils.rm(dest)
+          FileUtils.rm_f(managed_marker(dest))
           puts "Removed #{dest}"
         else
           puts "Not installed at #{dest} (nothing to do)"
@@ -92,6 +110,35 @@ module Yamine
 
       def bundled_skill_path
         File.expand_path("../../ask/skills/yamine/SKILL.md", __dir__)
+      end
+
+      def managed_marker(dest)
+        File.join(File.dirname(dest), ".yamine-managed")
+      end
+
+      def managed?(dest)
+        File.file?(managed_marker(dest))
+      end
+
+      def stamp(dest)
+        File.write(managed_marker(dest), "managed by yamine skills install; safe to auto-update\n")
+      rescue StandardError
+        nil
+      end
+
+      def candidates
+        [
+          File.expand_path("~/.agents/skills/#{SKILL_NAME}/SKILL.md"),
+          File.join(Dir.pwd, ".agents", "skills", SKILL_NAME, "SKILL.md")
+        ]
+      end
+
+      def sync_copy(dest)
+        source = bundled_skill_path
+        FileUtils.cp(source, dest) if File.exist?(source) && File.read(source) != File.read(dest)
+        stamp(dest)
+      rescue StandardError
+        nil
       end
 
       def take_flags(args)
