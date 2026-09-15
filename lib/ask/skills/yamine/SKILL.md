@@ -39,7 +39,7 @@ yamine start --json       # machine-readable wait result (--wait default)
 yamine                    # same as start
 yamine stop               # stop this app's backend + routes
 yamine status             # show service, processes, and URLs
-yamine log [-f]           # tail the web process log
+yamine log [-F]           # tail log/development.log (every process)
 ```
 
 `$PORT` and `YAMINE_URL` are injected per process; HTTP processes get

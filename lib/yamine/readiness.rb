@@ -189,13 +189,14 @@ module Yamine
     end
 
     # Why a process that died before answering died: the recognized
-    # fatal line when there is one, else point at its log.
+    # fatal line when there is one, else point at the shared log
+    # (every process appends to log/development.log).
     def died_detail(name, slot)
       reason = fatal_line(slot[:log_path])
       if reason
-        "process exited: #{reason} (log/yamine-#{name}.log)"
+        "process exited: #{reason} (log/development.log)"
       else
-        "process exited before becoming healthy — see log/yamine-#{name}.log"
+        "process exited before becoming healthy — see log/development.log"
       end
     end
 

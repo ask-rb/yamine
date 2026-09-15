@@ -104,7 +104,7 @@ module Yamine
           yamine kamal <variant>        Preview-deploy snippet for Kamal
           yamine stop                   Stop this app's backend + routes
           yamine restart                Touch tmp/restart.txt
-          yamine log [-f] [n]           Tail (or follow) this app's backend log
+          yamine log [-F] [n]           Tail (or follow) log/development.log
 
         Flags: --variant, --tld, --force, --app-port, --wait (default), --no-wait, --json, --branch
         Env: YAMINE_VARIANT/TLD/PORT/STATE_DIR/AGENT, YAMINE_BRANCH=1

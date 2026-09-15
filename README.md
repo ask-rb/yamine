@@ -229,7 +229,7 @@ yamine db list|create|drop    # per-worktree databases
 yamine worktree list|add|remove|clean   # worktree lifecycle
 yamine stop                   # stop this app's backend + routes
 yamine restart                # touch tmp/restart.txt (managed apps reboot)
-yamine log [-f] [n]           # tail (or follow) this app's backend log
+yamine log [-F] [n]           # tail (or follow) log/development.log
 yamine proxy start|stop       # control the proxy
 yamine service install|status|uninstall   # root-owned OS startup service
 yamine hosts sync|clean       # manage /etc/hosts entries
@@ -276,9 +276,10 @@ old fire-and-forget path.
 
 ## Log rotation
 
-`proxy.log` and per-app backend logs rotate at 5MB
-(`YAMINE_LOG_MAX_BYTES`), keeping one generation. `doctor` warns
-when the state dir passes 100MB.
+`proxy.log` rotates at 5MB (`YAMINE_LOG_MAX_BYTES`), keeping one
+generation. `log/development.log` is rotated too — use
+`tail -F log/development.log` (or `yamine log -F`) so rotation doesn't
+lose the tail. `doctor` warns when the state dir passes 100MB.
 
 ## Supervision
 

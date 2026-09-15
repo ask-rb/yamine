@@ -91,8 +91,10 @@ module Yamine
 
     # Run an arbitrary command with PORT + YAMINE_URL. Returns App.
     # register: false spawns without a route (background processes).
-    # Child output goes to log/yamine-<name>.log so `--wait` failure
-    # payloads can tail it (same file the managed path uses).
+    # Child output goes to log/development.log (every process appends
+    # to the same file) so `tail -f log/development.log` is the same
+    # view yamine's failure payloads use. Interleaving matches the
+    # foreman/without-yamine experience.
     #
     # extra_env is the config's env.clear/env.secret for this process —
     # yamine's own keys (PORT, YAMINE_URL, DATABASE_URL, the TLS vars)
@@ -221,6 +223,14 @@ module Yamine
 
     private
 
+    def cleanup_legacy_logs(dir)
+      Dir.glob(File.expand_path(File.join(dir, "log", "yamine-*.log*"))).each do |path|
+        FileUtils.rm_f(path)
+      rescue SystemCallError
+        nil
+      end
+    end
+
     def socket_command(dir, socket_path)
       socket = "unix://#{socket_path}"
       config_ru = File.join(dir, "config.ru")
@@ -288,12 +298,15 @@ module Yamine
       end
     end
 
-    # Log path for a process — public so the --wait failure payload
-    # can tail the right file for the phase that failed.
-    def log_path(dir, name)
-      path = File.expand_path(File.join(dir, "log", "yamine-#{name}.log"))
+    # Log path for any process — every process appends to
+    # log/development.log so `tail -F` is the one view for humans
+    # and for --wait failure tails. Keep the two-arg signature so
+    # existing call sites don't need to change.
+    def log_path(dir, _name = nil)
+      path = File.expand_path(File.join(dir, "log", "development.log"))
       FileUtils.mkdir_p(File.dirname(path))
       Log.rotate(path)
+      cleanup_legacy_logs(dir)
       path
     end
 

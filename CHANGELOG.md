@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.15.0] — 2026-09-15
+
+### Changed
+
+- **App logs now live in `log/development.log` — `log/yamine-*.log` is gone.**
+  Every process used to append to a per-process `log/yamine-#{name}.log`,
+  hijacking the Rails request log away from `log/development.log` and
+  making `tail -f log/development.log` go silent under yamine. Now
+  every process appends to the same shared file — the one Rails people
+  already expect — with `tail -F` surviving rotation. `yamine log` and
+  `yamine log -F` tail that file; the `--wait` failure payload's log tail
+  and `died_detail` now point at `log/development.log` too. Old
+  `log/yamine-*.log` files are cleaned up automatically on the next
+  boot. Interleaving matches the foreman/without-yamine experience; a
+  per-process opt-in can be added later if needed.
+
 ## [0.14.3] — 2026-09-15
 
 ### Fixed

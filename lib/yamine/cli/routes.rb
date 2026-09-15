@@ -249,12 +249,13 @@ module Yamine
         puts "Touched #{path} — managed app restarts on next request."
       end
 
-      # Tail the app log (default 50 lines); --follow streams.
-      def log(ctx, args)
+      # Tail the shared app log (default 50 lines); --follow streams.
+      # Every process writes log/development.log, so `yamine log` and
+      # `yamine log -F` tail the one file `tail -F` survives rotation.
+      def log(_ctx, args)
         follow = args.delete("--follow") || args.delete("-f")
         lines = (args.first || 50).to_i
-        resolved = Resolver.resolve(Dir.pwd)
-        path = File.expand_path(File.join(Dir.pwd, "log", "yamine-#{resolved.app}.log"))
+        path = File.expand_path(File.join(Dir.pwd, "log", "development.log"))
         unless File.file?(path)
           puts "No log at #{path} yet."
           return

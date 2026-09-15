@@ -268,7 +268,7 @@ module Yamine
           children << { name: item[:name], pid: app.pid }
           apps[item[:name]] = {
             item: item,
-            log_path: File.join(Dir.pwd, "log", "yamine-#{item[:name]}.log"),
+            log_path: File.join(Dir.pwd, "log", "development.log"),
             app: app
           }
         end
@@ -330,7 +330,7 @@ module Yamine
       def tail_for(failure, apps)
         name = failure[:name]
         slot = apps[name]
-        path = slot ? File.expand_path(File.join(Dir.pwd, "log", "yamine-#{name}.log")) : nil
+        path = slot ? File.expand_path(File.join(Dir.pwd, "log", "development.log")) : nil
         lines = path && File.file?(path) ? File.readlines(path).last(20).join : "(no log file)"
         { path: path, tail: lines }
       rescue SystemCallError
@@ -580,7 +580,7 @@ module Yamine
           if dead
             pid, name = dead
             $stderr.puts "\n[#{name}] exited (pid #{pid}) — stopping the whole tree."
-            log = File.join(Dir.pwd, "log", "yamine-#{name}.log")
+            log = File.join(Dir.pwd, "log", "development.log")
             $stderr.puts "  log: #{log}" if File.file?(log)
             reporter&.note("#{name} exited; cleaning up routes")
             cleanup_routes(ctx, hostnames)
