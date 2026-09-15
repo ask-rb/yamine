@@ -32,6 +32,7 @@ require_relative "yamine/cli/boot"
 require_relative "yamine/cli/routes"
 require_relative "yamine/cli/system"
 require_relative "yamine/cli/worktree"
+require_relative "yamine/cli/skills"
 require_relative "yamine/cli"
 
 # Stable named .localhost URLs for Ruby development.
