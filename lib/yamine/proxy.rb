@@ -485,7 +485,12 @@ module Yamine
       items = routes.map { |r| "<li>#{escape(r["hostname"])}</li>" }.join
       body = "<h1>No app registered for #{escape(bare)}</h1>" \
              "#{hint}<ul>#{items}</ul>"
-      respond(sock, 404, body)
+      # 503, not 404: 404 says the app answered and has nothing at that path,
+      # and a client that believes it goes looking for a bug in the app. This
+      # is the proxy saying the app is not there — the same answer a dead
+      # backend gets (502 Bad Gateway), so no caller has to read the body to
+      # tell "not running" from "the app said no".
+      respond(sock, 503, body)
     end
 
     def render_bad_gateway(sock)

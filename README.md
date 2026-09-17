@@ -207,8 +207,9 @@ yamine alias tenant1 4001 --wildcard   # one route, its subdomains
 Off is the useful default. An unregistered label under a live app is far
 more likely to be a worktree whose stack is stopped than a tenant, and
 handing that label to the parent app means HTTP 200 with the wrong code.
-Instead the request 404s and names the parent app, its directory, and how
-to start it. `yamine status` reports which mode an app is in.
+Instead the request fails with 503 and names the parent app, its directory,
+and how to start it — the app is not there, which is not the same statement
+as the app answering 404. `yamine status` reports which mode an app is in.
 
 ## Commands
 

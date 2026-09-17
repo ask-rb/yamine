@@ -50,11 +50,14 @@ class RebindingTest < Minitest::Test
     FileUtils.remove_entry(dir) if dir
   end
 
-  def test_own_tld_gets_helpful_404
+  def test_own_tld_gets_helpful_503
     proxy, dir = proxy_with(["myapp.localhost"])
     port, server, accept = serve(proxy)
     response = get(port, "unknown.localhost")
-    assert_includes response, "404"
+    # 503, not 404: "the app is not running" and "the app has nothing at that
+    # path" are different statements, and a client can tell them apart by the
+    # status alone.
+    assert_includes response, "503"
     assert_includes response, "myapp.localhost"
   ensure
     accept&.kill

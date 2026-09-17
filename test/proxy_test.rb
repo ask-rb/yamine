@@ -95,7 +95,7 @@ class ProxyLiveTest < Minitest::Test
     FileUtils.remove_entry(dir) if dir
   end
 
-  def test_unknown_host_404_lists_routes
+  def test_unknown_host_503_lists_routes
     dir = Dir.mktmpdir
     store = Yamine::RouteStore.new(dir)
     store.add_route("myapp.localhost", "127.0.0.1:9", 0, kind: "tcp")
@@ -111,7 +111,8 @@ class ProxyLiveTest < Minitest::Test
     sock = TCPSocket.new("127.0.0.1", proxy_port)
     sock.write("GET / HTTP/1.1\r\nHost: nope.localhost\r\nConnection: close\r\n\r\n")
     response = sock.read
-    assert_includes response, "404"
+    # The app is not there — not the app saying it has nothing there.
+    assert_includes response, "503"
     assert_includes response, "myapp.localhost"
   ensure
     server&.close
@@ -138,7 +139,7 @@ class ProxyLiveTest < Minitest::Test
     sock = TCPSocket.new("127.0.0.1", proxy_port)
     sock.write("GET / HTTP/1.1\r\nHost: my-branch.myapp.localhost\r\nConnection: close\r\n\r\n")
     response = sock.read
-    assert_includes response, "404"
+    assert_includes response, "503"
     assert_includes response, "my-branch.myapp.localhost"
     assert_includes response, "myapp.localhost"
     assert_includes response, "/code/myapp"

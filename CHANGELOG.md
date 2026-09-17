@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **A hostname with no route answers 503, not 404.** The proxy was
+  answering 404 for "no app registered for this hostname" — the same status
+  an app gives for a path it does not have. A machine client (a health
+  check, an API client, an agent) that trusts the status concluded the app
+  had answered and went looking for a bug in the app's routes, when the app
+  was not running at all. It now answers 503 Service Unavailable with the
+  same helpful page (parent app, its directory, `yamine start`), so the
+  status alone says the app is not there — matching the 502 a registered
+  route with a dead backend already gets. Foreign hosts keep their bare 404
+  that names nothing.
+
 ## [0.15.1] — 2026-09-22
 
 ### Fixed
