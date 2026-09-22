@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.15.1] — 2026-09-22
+
+### Fixed
+
+- **Stale merged worktrees now lose their branch too.** A worktree whose
+  directory was already gone was pruned from git, but its branch was
+  left behind — so `remove` and `clean` reported success while the
+  merged branch lingered, unlike a normal teardown. Stale entries now
+  delete a merged branch the same way (`git branch -d` after the
+  prune), and an unmerged branch is kept with the reason said out loud
+  unless `--force`. Regression coverage pins all three: stale + merged
+  deletes, stale + unmerged keeps, and `clean` doing the same sweep.
+
 ## [0.15.0] — 2026-09-15
 
 ### Changed
