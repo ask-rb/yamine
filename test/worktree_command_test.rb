@@ -92,6 +92,11 @@ class WorktreeCommandTest < Minitest::Test
     {}
   end
 
+  def branch_exists?(name)
+    system("git", "-C", @app, "rev-parse", "--verify", "--quiet",
+      "refs/heads/#{name}", out: File::NULL, err: File::NULL)
+  end
+
   # ── add ─────────────────────────────────────────────────────────────
 
   def test_add_creates_a_bootable_worktree
@@ -283,6 +288,38 @@ class WorktreeCommandTest < Minitest::Test
     in_app { assert_equal 1, `git worktree list | wc -l`.to_i }
   end
 
+  def test_remove_stale_merged_worktree_deletes_the_branch
+    run_cli("add", "done")
+    in_app { system("git", "merge", "-q", "done", "-m", "merge", out: File::NULL, err: File::NULL) }
+    FileUtils.rm_rf(worktree_path("done"))
+
+    code, out, = run_cli("remove", "done")
+
+    assert_equal 0, code, out
+    assert_match(/pruned/, out)
+    assert_match(/deleted branch done/, out)
+    refute branch_exists?("done")
+    assert_empty claims
+  end
+
+  def test_remove_stale_unmerged_worktree_keeps_the_branch
+    run_cli("add", "wip")
+    Dir.chdir(worktree_path("wip")) do
+      File.write("README.md", "work\n")
+      system("git", "add", "-A")
+      system("git", "commit", "-qm", "work", out: File::NULL, err: File::NULL)
+    end
+    FileUtils.rm_rf(worktree_path("wip"))
+
+    code, out, = run_cli("remove", "wip")
+
+    assert_equal 0, code, out
+    assert_match(/pruned/, out)
+    assert_match(/kept branch wip/, out)
+    assert branch_exists?("wip")
+    assert_empty claims
+  end
+
   # ── clean ───────────────────────────────────────────────────────────
 
   def test_clean_keeps_unmerged_and_dirty_reports_the_reason
@@ -358,6 +395,19 @@ class WorktreeCommandTest < Minitest::Test
     assert_empty claims
     assert_match(/claim forgotten/, out)
     in_app { assert_equal 1, `git worktree list | wc -l`.to_i }
+  end
+
+  def test_clean_stale_merged_worktree_deletes_the_branch
+    run_cli("add", "done")
+    in_app { system("git", "merge", "-q", "done", "-m", "merge", out: File::NULL, err: File::NULL) }
+    FileUtils.rm_rf(worktree_path("done"))
+
+    code, out, = run_cli("clean")
+
+    assert_equal 0, code, out
+    assert_match(/deleted branch done/, out)
+    refute branch_exists?("done")
+    assert_empty claims
   end
 
   def test_clean_with_nothing_to_do_says_so

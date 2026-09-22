@@ -210,7 +210,7 @@ module Yamine
         end
 
         unless entry.exists?
-          abandon(ctx, repo, entry)
+          abandon(ctx, repo, entry, force: opts[:force])
           return
         end
 
@@ -251,6 +251,7 @@ module Yamine
 
         failures = 0
         changed = false
+        stale = []
         plan.each do |step|
           case step[0]
           when :drop_db
@@ -266,12 +267,14 @@ module Yamine
               failures += 1
             end
           when :prune
+            stale << step[1]
             changed = true
           when :keep
             puts "  kept #{step[1]} — #{step[2]}"
           end
         end
         Worktrees.prune(repo) if repo
+        stale.each { |entry| delete_stale_branch(repo, entry) } if repo
         resync_hosts(ctx) if repo && changed
         ran = plan.count { |s| %i[drop_db teardown prune].include?(s[0]) }
         summary = "Cleaned #{ran} item(s)"
@@ -285,7 +288,7 @@ module Yamine
           case action
           when :drop_db then "drop database #{subject} (#{reason} is gone)"
           when :teardown then "remove worktree #{subject.path} (#{reason})"
-          when :prune then "prune stale git entry #{subject}"
+          when :prune then "prune stale git entry #{subject.path}"
           when :keep then "keep #{subject} — #{reason}"
           end
         end
@@ -303,7 +306,7 @@ module Yamine
           next if entry.bare || entry.main?
 
           unless entry.exists?
-            plan << Plan.new(:prune, entry.path)
+            plan << Plan.new(:prune, entry)
             next
           end
           if Worktrees.dirty?(entry.path, ignore: LOCAL_CONFIG_FILES)
@@ -370,8 +373,10 @@ module Yamine
       end
 
       # A worktree whose directory is already gone: nothing to stop or
-      # remove, just its database claim and the stale git entry.
-      def abandon(ctx, repo, entry)
+      # remove, just its database claim, the stale git entry, and — when
+      # the branch is merged — the branch itself, matching what a normal
+      # removal would have done.
+      def abandon(ctx, repo, entry, force: false)
         map = Database.load_map(ctx.store.dir)
         claim = claim_for(map, entry.path)
         if claim
@@ -379,6 +384,26 @@ module Yamine
         end
         Worktrees.prune(repo)
         puts "  pruned #{entry.path} (directory was already gone)"
+        delete_stale_branch(repo, entry, force: force)
+      end
+
+      # Prune first so git will allow the delete; an unmerged branch is
+      # kept unless force, exactly as teardown does for a live worktree.
+      def delete_stale_branch(repo, entry, force: false)
+        return unless entry.branch && Worktrees.branch_exists?(repo, entry.branch)
+
+        merged = Worktrees.merged?(repo, entry.branch,
+          into: Worktrees.default_branch(repo))
+        if force || merged
+          flag = force ? "-D" : "-d"
+          _out, status = Open3.capture2("git", "branch", flag, entry.branch,
+            chdir: repo, err: File::NULL)
+          if status&.success?
+            puts "  deleted branch #{entry.branch}"
+            return
+          end
+        end
+        puts "  kept branch #{entry.branch} (git refuses to delete an unmerged branch)"
       end
 
       # The teardown shared by `remove` and `clean`. Returns true when
