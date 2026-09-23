@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-09-23
+
+### Changed
+
+- **Only environment-scoped env files — never plain `.env`.**
+  `worktree add` writes `.env.development` + `.env.test`; the plain
+  `.env` it also wrote in 0.17.0 is gone. Plain `.env` is the file
+  production-style tooling reads by name — kamal, docker
+  `--env-file`, and dotenv itself loads `.env` in *every* environment
+  — so a worktree's copy could leak development database URLs into a
+  production boot that happened to run from that directory.
+  `.env.development` / `.env.test` are invisible to a production boot
+  by construction. A yamine-authored `.env` from 0.17.0 is cleaned up
+  on sight (header-marked); a foreign `.env` — app-committed or
+  hand-written — is never touched.
+- **Env-file writes upsert instead of overwrite.** yamine's keys are
+  (re)written; every other line in the file survives, so a committed
+  env file's config or a developer's copied-in API keys are no longer
+  destroyed by `yamine db create`. The yamine header stays
+  idempotent across re-runs.
+
+
 ## [0.17.0] — 2026-09-23
 
 ### Added

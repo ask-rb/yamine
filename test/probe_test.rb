@@ -55,13 +55,13 @@ class ProbeTest < Minitest::Test
   end
 
   def test_rails_databases_reads_the_fake_app
-    # The fake simulates a dotenv-loading app: when .env exists, its
+    # The fake simulates a dotenv-loading app: when .env.development exists, its
     # DATABASE_URL wins — exactly what dotenv-rails does to Rails.
     write_fake_rails(<<~SH)
       [ "$1" = "runner" ] || exit 0
       echo "boot noise first"
-      if [ -f .env ]; then
-        V=$(sed -n "s/^DATABASE_URL='\\(.*\\)'$/\\1/p" .env)
+      if [ -f .env.development ]; then
+        V=$(sed -n "s/^DATABASE_URL='\\(.*\\)'$/\\1/p" .env.development)
         printf '%s\\n' "YAMINE_DBS=[{\\"name\\":\\"primary\\",\\"database\\":\\"${V##*/}\\",\\"url\\":\\"$V\\"}]"
       else
         printf '%s\\n' 'YAMINE_DBS=[{"name":"primary","database":"app_dev","url":"postgres://u@h/app_dev"}]'
@@ -74,7 +74,7 @@ class ProbeTest < Minitest::Test
       { "DATABASE_URL" => "postgres://u@h/app_dev_wt" })
     rows = Yamine::Probe.rails_databases(@dir)
     assert_equal "app_dev_wt", rows.first["database"],
-      "a dotenv-loading app resolves suffixed once .env exists"
+      "a dotenv-loading app resolves suffixed once .env.development exists"
   end
 
   def test_rails_databases_returns_nil_when_the_app_fails

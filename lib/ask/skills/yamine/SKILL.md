@@ -116,9 +116,11 @@ credentials resolve inside the app; yamine never parses them), and
 provisions the whole set with schema — every database of a
 multi-database app gets a per-worktree suffix, the test database
 included and schema-prepared, so `rails test` runs as-is. It writes
-`.env` / `.env.development` (the development set) and `.env.test`
+`.env.development` (the development set) and `.env.test`
 (`PRIMARY_DATABASE_URL` — the key Rails checks first for a flat test
-config) into the worktree, git-excluded automatically. Then boot with
+config) into the worktree, git-excluded automatically — never plain `.env`
+(production tooling reads that name), and existing keys in those files
+are upserted, not clobbered. Then boot with
 `yamine start` inside it. `remove` and `clean` drop the entire set as
 a unit — including from an orphaned claim whose directory is gone,
 without booting the app — and `clean` never touches uncommitted work;
@@ -133,7 +135,7 @@ worktree after the app grows a database).
 
 Isolation reaches two places: supervised boots via injected
 `DATABASE_URL` / `NAME_DATABASE_URL` env vars, and hand-run commands
-(`rails console`, `rails test`, `db:migrate`) via the `.env` files —
+(`rails console`, `rails test`, `db:migrate`) via these env files —
 which require a dotenv loader in the app (`gem "dotenv-rails",
 groups: [:development, :test]`) and **component-form development/test
 config** (`database:` keys, never `url:` — a `url:` key takes

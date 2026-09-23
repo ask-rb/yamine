@@ -32,17 +32,29 @@ module Yamine
 
     MAX_IDENTIFIER_BYTES = 63
     STATE_FILE = "databases.json"
-    # The per-worktree environment files yamine writes: `.env` carries
-    # the development set for ANY dotenv-style loader (framework-agnostic),
+    # The per-worktree environment files yamine writes — ONLY
+    # environment-scoped names, never plain `.env`. Production-style
+    # tooling reads `.env` by name (kamal, docker --env-file, and
+    # dotenv itself loads `.env` in *every* environment), so a
+    # worktree's plain `.env` could leak dev database URLs into a
+    # production boot that happened to run from this directory.
+    # `.env.development` / `.env.test` are invisible to a production
+    # boot by construction — dotenv only ever reads
+    # `.env.#{Rails.env}` for the current environment.
+    #
     # `.env.test` carries PRIMARY_DATABASE_URL — the key Rails checks
-    # *before* DATABASE_URL for a flat test config, so the test URL wins
-    # no matter which order a loader reads the two files in. Hand-run
-    # commands (`rails console`, `rails test`, `db:migrate`) pick these
-    # up; env injection still covers processes yamine spawns itself.
-    ENV_FILES = %w[.env .env.development .env.test].freeze
-    # 0.16.0's marker file — removed in favor of .env; deleted on sight
-    # so upgraded worktrees don't accumulate dead files.
+    # *before* DATABASE_URL for a flat test config, so the test URL
+    # wins no matter which order a loader reads the files in. Hand-run
+    # commands (`rails console`, `rails test`, `db:migrate`) pick
+    # these up; env injection still covers processes yamine spawns.
+    ENV_FILES = %w[.env.development .env.test].freeze
+    # 0.16.0's marker file — removed in favor of env files; deleted on
+    # sight so upgraded worktrees don't accumulate dead files.
     LEGACY_MARKER_FILE = ".yamine-db-suffix"
+    # 0.17.0 wrote plain `.env` too; this header marks it as ours to
+    # delete. A `.env` WITHOUT the header belongs to the app or the
+    # developer and is never touched.
+    LEGACY_ENV_HEADER = "written by yamine"
 
     # Database name for a worktree dir + env (development/test).
     # Main checkout (no worktree marker) keeps the bare name.
@@ -176,44 +188,63 @@ module Yamine
       name
     end
 
-    # Write the worktree's environment files: `.env` with the whole
-    # development set (dotenv-compatible — any framework or plain Ruby
-    # app that loads .env gets hand-run isolation for free) and
-    # `.env.test` with the test URL under PRIMARY_DATABASE_URL.
-    # Private (URLs carry whatever the app's config carries), and the
-    # 0.16.0 marker file is removed on the way past.
+    # Write the worktree's environment files (see ENV_FILES for the
+    # why of the names). Upsert semantics: our keys are (re)written,
+    # every other line in the file survives — a committed env file's
+    # non-database config, or a developer's copied-in API keys, must
+    # not be destroyed by `yamine db create`. Private mode; the
+    # 0.16.0 marker and a yamine-authored 0.17.0 `.env` are removed
+    # on the way past.
     def write_env_files(dir, dev_env, test_url: nil)
       FileUtils.rm_f(File.join(dir, LEGACY_MARKER_FILE))
+      remove_legacy_worktree_env(dir)
       return if dev_env.nil? && test_url.nil?
 
       unless dev_env.nil? || dev_env.empty?
-        body = dotenv_body(dev_env.reject { |k, _v| k == "PRIMARY_DATABASE_URL" })
-        write_env_file(File.join(dir, ".env"), body)
-        # Same content under the env-specific name: a loader that
-        # prefers .env.development over .env finds identical values.
-        write_env_file(File.join(dir, ".env.development"), body)
+        merge_env_file(File.join(dir, ".env.development"),
+          dev_env.reject { |k, _v| k == "PRIMARY_DATABASE_URL" })
       end
       return if test_url.nil? || test_url.to_s.empty?
 
-      write_env_file(File.join(dir, ".env.test"),
-        dotenv_body({ "PRIMARY_DATABASE_URL" => test_url }))
+      merge_env_file(File.join(dir, ".env.test"),
+        { "PRIMARY_DATABASE_URL" => test_url })
     end
 
-    def write_env_file(path, body)
+    # 0.17.0 wrote plain `.env` — remove it ONLY when yamine authored
+    # it; an app-committed or developer-written `.env` is theirs.
+    def remove_legacy_worktree_env(dir)
+      path = File.join(dir, ".env")
+      return unless File.file?(path)
+      return unless File.read(path).include?(LEGACY_ENV_HEADER)
+
+      FileUtils.rm_f(path)
+    end
+
+    # Upsert our keys into a dotenv file, preserving every other line.
+    # Our header is placed once (idempotent across re-runs).
+    def merge_env_file(path, env)
+      existing = File.file?(path) ? File.read(path).lines : []
+      key_res = env.keys.map { |k| /\A\s*#{Regexp.escape(k)}\s*=/ }
+      kept = existing.reject { |line| key_res.any? { |re| line.match?(re) } }
+      unless kept.any? { |line| line.include?(LEGACY_ENV_HEADER) }
+        kept = yamine_env_header.lines + kept
+      end
+      body = kept.join
+      body += "\n" unless body.empty? || body.end_with?("\n")
+      body += env.map { |k, v| "#{k}='#{dotenv_escape(v.to_s)}'\n" }.join
       File.write(path, body)
       File.chmod(0o600, path)
+    end
+
+    def yamine_env_header
+      "# Per-worktree databases, written by yamine (worktree add).\n" \
+      "# Environment-scoped (.env.development/.env.test) so a production\n" \
+      "# boot never reads these; other keys in this file are preserved.\n"
     end
 
     # dotenv format: single-quoted values (literal — no interpolation
     # of a password's `$` or `#`), with the two escapes the dotenv
     # grammar allows inside them.
-    def dotenv_body(env)
-      header = "# Per-worktree databases, written by yamine (worktree add).\n" \
-              "# Loaded by dotenv-rails / any dotenv loader; removed with this worktree.\n"
-      lines = env.map { |k, v| "#{k}='#{dotenv_escape(v.to_s)}'" }
-      "#{header}#{lines.join("\n")}\n"
-    end
-
     def dotenv_escape(value)
       value.gsub("\\") { "\\\\" }.gsub("'") { "\\'" }
     end

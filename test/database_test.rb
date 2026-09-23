@@ -483,20 +483,20 @@ class MultiDatabaseNamingTest < Minitest::Test
     Yamine::Database.write_env_files(@dir, dev_env,
       test_url: "postgres://p'w$rd@h/app_test_fix")
 
-    env = File.read(File.join(@dir, ".env"))
+    env = File.read(File.join(@dir, ".env.development"))
     assert_includes env, "DATABASE_URL='postgres://u@h/app_dev_fix'"
     assert_includes env, "CACHE_DATABASE_URL='postgres://u@h/app_dev_cache_fix'"
     refute_includes env, "PRIMARY_DATABASE_URL",
-      ".env must not pin PRIMARY — .env.test uses that key to win the test env"
-    # The env-specific twin carries identical dev values.
-    assert_equal env, File.read(File.join(@dir, ".env.development"))
+      ".env.development must not pin PRIMARY — .env.test uses that key"
+    refute File.exist?(File.join(@dir, ".env")),
+      "plain .env is never written — production tooling reads that name"
 
     test_env = File.read(File.join(@dir, ".env.test"))
     # Order-independent test override: Rails checks PRIMARY_DATABASE_URL
     # before DATABASE_URL, and only .env.test sets this key.
     assert_includes test_env, "PRIMARY_DATABASE_URL='postgres://p\\'w$rd@h/app_test_fix'"
 
-    [".env", ".env.development", ".env.test"].each do |f|
+    %w[.env.development .env.test].each do |f|
       mode = File.stat(File.join(@dir, f)).mode & 0o777
       assert_equal 0o600, mode, "#{f} carries connection URLs — must be private"
     end
@@ -507,6 +507,50 @@ class MultiDatabaseNamingTest < Minitest::Test
     Yamine::Database::ENV_FILES.each do |f|
       assert_equal 1, exclude.map(&:strip).count(f), "#{f} excluded exactly once"
     end
+  end
+
+  def test_merge_env_file_preserves_foreign_keys_and_is_idempotent
+    # A developer's own entries (copied-in API keys) and a stale value
+    # for one of ours: ours get updated, theirs survive — `yamine db
+    # create` must never destroy a file it didn't fully author.
+    path = File.join(@dir, ".env.development")
+    File.write(path, <<~ENV)
+      # their own note, kept
+      API_KEY="secret-$123"
+      DATABASE_URL=postgres://old/stale
+      OTHER=keepme
+    ENV
+    Yamine::Database.write_env_files(@dir,
+      { "DATABASE_URL" => "postgres://u@h/fresh" })
+    Yamine::Database.write_env_files(@dir,
+      { "DATABASE_URL" => "postgres://u@h/fresh2" })
+
+    body = File.read(path)
+    assert_includes body, %q(API_KEY="secret-$123")
+    assert_includes body, "OTHER=keepme"
+    assert_includes body, "# their own note, kept"
+    assert_includes body, "DATABASE_URL='postgres://u@h/fresh2'"
+    refute_includes body, "stale"
+    refute_includes body, "'postgres://u@h/fresh'\nDATABASE_URL='postgres://u@h/fresh2'",
+      "the old value is replaced, not appended"
+    assert_equal 1, body.scan("written by yamine").size,
+      "our header appears exactly once across re-runs"
+  end
+
+  def test_legacy_plain_env_removed_only_when_yamine_authored_it
+    # 0.17.0 wrote plain .env — ours (header marked) gets cleaned up...
+    File.write(File.join(@dir, ".env"),
+      "# Per-worktree databases, written by yamine (worktree add).\nDATABASE_URL='x'\n")
+    Yamine::Database.write_env_files(@dir, { "DATABASE_URL" => "postgres://u@h/x" })
+    refute File.exist?(File.join(@dir, ".env")),
+      "yamine-authored 0.17.0 .env is removed"
+
+    # ...but an app-committed or developer-written .env is theirs.
+    File.write(File.join(@dir, ".env"), "APP_CONFIG=theirs\n")
+    Yamine::Database.write_env_files(@dir, { "DATABASE_URL" => "postgres://u@h/x" })
+    assert File.exist?(File.join(@dir, ".env")), "a foreign .env is never touched"
+    assert_equal "APP_CONFIG=theirs\n", File.read(File.join(@dir, ".env"))
+    assert File.exist?(File.join(@dir, ".env.development")), "our file exists alongside"
   end
 
   def test_dotenv_escape_handles_quotes_and_backslashes
@@ -521,7 +565,8 @@ class MultiDatabaseNamingTest < Minitest::Test
     Yamine::Database.write_env_files(@dir, { "DATABASE_URL" => "postgres://u@h/x" })
     refute File.exist?(File.join(@dir, ".yamine-db-suffix")),
       "0.16.0's marker file is cleaned up on sight"
-    assert File.exist?(File.join(@dir, ".env"))
+    assert File.exist?(File.join(@dir, ".env.development"))
+    refute File.exist?(File.join(@dir, ".env"))
   end
 
   def test_state_file_is_private

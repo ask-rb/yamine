@@ -253,13 +253,20 @@ yamine db create            # re-probe + provision (run after the app grows a da
    (any dotenv loader works). That is what reads the files
    `worktree add` writes into the worktree:
 
-   - `.env` / `.env.development` — the whole development set
-     (`DATABASE_URL` plus one `NAME_DATABASE_URL` per configuration),
+   - `.env.development` — the whole development set (`DATABASE_URL`
+     plus one `NAME_DATABASE_URL` per configuration),
    - `.env.test` — the test URL under `PRIMARY_DATABASE_URL`, the key
      Rails checks *before* `DATABASE_URL` for a flat test config, so it
      wins regardless of the order a loader reads the files in.
 
-   Mode 0600, git-excluded automatically, removed with the worktree.
+   Only these environment-scoped names are ever written — **never
+   plain `.env`**, the file production tooling reads by name (kamal,
+   docker `--env-file`, and dotenv itself loads `.env` in *every*
+   environment), so a production boot can never see a worktree's
+   database URLs. Mode 0600, git-excluded automatically, removed with
+   the worktree. Existing keys in those files are **upserted, never
+   clobbered** — your own entries (API keys, a committed env file's
+   config) survive `yamine db create`.
    A hand-run `rails console`, `rails test`, or `db:migrate` in the
    worktree therefore lands on the worktree's own databases — with
    **zero yamine-specific code in `database.yml`, ever**.
@@ -275,7 +282,7 @@ Credential keys travel too: `config/master.key`,
 `config/credentials/test.key` are copied at mode 0600. Production and
 staging keys stay in the main checkout where they belong.
 
-The main checkout never gets `.env` files or a suffix: its databases
+The main checkout never gets these env files or a suffix: its databases
 are its databases, untouched.
 
 

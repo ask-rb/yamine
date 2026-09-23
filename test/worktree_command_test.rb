@@ -420,7 +420,7 @@ end
 
 # Multi-database worktrees: the app is asked what it has (a fake
 # bin/rails that answers the probe like a dotenv-loading Rails app),
-# the whole set is claimed, suffixed, written to .env, and dropped as
+# the whole set is claimed, suffixed, written to .env.development/.env.test, and
 # a unit.
 class WorktreeMultiDbTest < Minitest::Test
   def setup
@@ -443,7 +443,7 @@ class WorktreeMultiDbTest < Minitest::Test
     FileUtils.remove_entry(@root)
   end
 
-  # A conforming fake: base names until yamine writes .env, suffixed
+  # A conforming fake: base names until yamine writes .env.development, suffixed
   # names after — exactly what dotenv-rails does to Rails. Keys are
   # gitignored like a real credentials app.
   def make_rails_multi_app(dir)
@@ -476,7 +476,7 @@ class WorktreeMultiDbTest < Minitest::Test
           exit 0
         fi
         [ "$1" = "runner" ] || exit 0
-        # Simulates a dotenv-loading app: .env / .env.test win when present.
+        # Simulates a dotenv-loading app: .env.development / .env.test win.
         if [ "$RAILS_ENV" = "test" ]; then
           if [ -f .env.test ]; then
             V=$(sed -n "s/^PRIMARY_DATABASE_URL='\\(.*\\)'$/\\1/p" .env.test)
@@ -486,9 +486,9 @@ class WorktreeMultiDbTest < Minitest::Test
           fi
           exit 0
         fi
-        if [ -f .env ]; then
-          D=$(sed -n "s/^DATABASE_URL='\\(.*\\)'$/\\1/p" .env)
-          C=$(sed -n "s/^CACHE_DATABASE_URL='\\(.*\\)'$/\\1/p" .env)
+        if [ -f .env.development ]; then
+          D=$(sed -n "s/^DATABASE_URL='\\(.*\\)'$/\\1/p" .env.development)
+          C=$(sed -n "s/^CACHE_DATABASE_URL='\\(.*\\)'$/\\1/p" .env.development)
           printf '%s\\n' "YAMINE_DBS=[{\\"name\\":\\"primary\\",\\"database\\":\\"${D##*/}\\",\\"url\\":\\"$D\\"},{\\"name\\":\\"cache\\",\\"database\\":\\"${C##*/}\\",\\"url\\":\\"$C\\"}]"
         else
           printf '%s\\n' 'YAMINE_DBS=[{"name":"primary","database":"app_dev","url":"postgres://u@127.0.0.1:5432/app_dev"},{"name":"cache","database":"app_dev_cache","url":"postgres://u@127.0.0.1:5432/app_dev_cache"}]'
@@ -562,15 +562,17 @@ class WorktreeMultiDbTest < Minitest::Test
     assert_equal "postgres://u@127.0.0.1:5432/app_dev", info.dig("bases", "primary")
 
     wt = worktree_path("feature")
-    env = File.read(File.join(wt, ".env"))
+    env = File.read(File.join(wt, ".env.development"))
+    refute File.exist?(File.join(wt, ".env")),
+      "plain .env is never written — production tooling reads that name"
     assert_includes env, "app_dev_#{suffix}"
     assert_includes env, "app_dev_cache_#{suffix}"
     refute_includes env, "PRIMARY_DATABASE_URL",
-      ".env must not pin PRIMARY — .env.test uses that key to win the test env"
+      ".env.development must not pin PRIMARY — .env.test uses that key"
     assert_includes File.read(File.join(wt, ".env.test")), "app_test_#{suffix}",
       ".env.test carries the test URL under PRIMARY_DATABASE_URL"
     exclude = File.read(File.join(@app, ".git", "info", "exclude"))
-    assert_includes exclude, ".env"
+    assert_includes exclude, ".env.development"
     # Only the keys the worktree's own environments need came along.
     assert File.file?(File.join(wt, "config", "credentials", "development.key"))
     assert File.file?(File.join(wt, "config", "credentials", "test.key"))
