@@ -29,19 +29,23 @@ module Yamine
       # credentials apps) no decryption key, which stops Rails before it
       # can even read database.yml. The single largest follow-up cost of
       # a new worktree, now carried automatically.
-      LOCAL_CONFIG_FILES = %w[config/local.yml config/local.secrets config/master.key].freeze
-      # Rails 7.1+ per-env credentials: development.key & co are
-      # gitignored exactly like master.key and equally fatal without.
-      CREDENTIALS_KEY_GLOB = "config/credentials/*.key"
+      LOCAL_CONFIG_FILES = %w[config/local.yml config/local.secrets].freeze
+      # Only the credential keys the worktree's own environments need:
+      # master (multi-env credentials), development (boots + probe),
+      # test (test runs). Production and staging keys have no business
+      # sitting in a throwaway worktree directory.
+      CREDENTIAL_KEY_FILES = %w[
+        config/master.key
+        config/credentials/development.key
+        config/credentials/test.key
+      ].freeze
 
-      # The static list plus whatever key files this checkout has, plus
-      # the worktree marker: everything yamine writes or copies that
-      # must never read as uncommitted work.
-      def local_config_files(dir)
-        keys = Dir.glob(File.join(dir, CREDENTIALS_KEY_GLOB)).map do |path|
-          path.sub(%r{\A#{Regexp.escape(dir.chomp("/"))}/?}, "")
-        end
-        LOCAL_CONFIG_FILES + keys + [Database::MARKER_FILE]
+      # Everything yamine copies or writes that must never read as
+      # uncommitted work: the per-checkout config, the three allowed
+      # keys, and the generated environment files.
+      def local_config_files(_dir)
+        LOCAL_CONFIG_FILES + CREDENTIAL_KEY_FILES + Database::ENV_FILES +
+          [Database::LEGACY_MARKER_FILE]
       end
 
       def run(ctx, args)
@@ -198,7 +202,7 @@ module Yamine
       # app's schema) so server problems surface at creation time, not
       # at first boot. Rails apps are ASKED what they have (the probe
       # resolves database.yml + credentials inside the app itself) and
-      # get the whole suffixed set — claim, marker file, databases,
+      # get the whole suffixed set — claim, .env files, databases,
       # schema. Boot reuses an existing set idempotently, so this is
       # never wasted work. SQLite and non-Rails apps fall through to
       # the single-database path, which setup_database narrates.

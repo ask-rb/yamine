@@ -930,7 +930,7 @@ module Yamine
       end
 
       # Main checkout: the databases ARE the app's own — no suffix, no
-      # marker, no claim names. Just make sure they exist.
+      # .env files, no claim names. Just make sure they exist.
       def db_create_main(rows)
         missing = rows.reject { |r| Database.exists?(r["database"], r["url"]) }
         failed = missing.filter_map do |r|

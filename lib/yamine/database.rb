@@ -32,12 +32,17 @@ module Yamine
 
     MAX_IDENTIFIER_BYTES = 63
     STATE_FILE = "databases.json"
-    # Written into a worktree at add time; the app's database.yml
-    # reads it and suffixes every database URL, so hand-run commands
-    # (console, test, db:migrate) land on the worktree's own
-    # databases too — env injection only ever reaches processes
-    # yamine spawns.
-    MARKER_FILE = ".yamine-db-suffix"
+    # The per-worktree environment files yamine writes: `.env` carries
+    # the development set for ANY dotenv-style loader (framework-agnostic),
+    # `.env.test` carries PRIMARY_DATABASE_URL — the key Rails checks
+    # *before* DATABASE_URL for a flat test config, so the test URL wins
+    # no matter which order a loader reads the two files in. Hand-run
+    # commands (`rails console`, `rails test`, `db:migrate`) pick these
+    # up; env injection still covers processes yamine spawns itself.
+    ENV_FILES = %w[.env .env.development .env.test].freeze
+    # 0.16.0's marker file — removed in favor of .env; deleted on sight
+    # so upgraded worktrees don't accumulate dead files.
+    LEGACY_MARKER_FILE = ".yamine-db-suffix"
 
     # Database name for a worktree dir + env (development/test).
     # Main checkout (no worktree marker) keeps the bare name.
@@ -171,28 +176,63 @@ module Yamine
       name
     end
 
-    def write_marker(dir, suffix)
-      File.write(File.join(dir, MARKER_FILE), "#{suffix}\n")
+    # Write the worktree's environment files: `.env` with the whole
+    # development set (dotenv-compatible — any framework or plain Ruby
+    # app that loads .env gets hand-run isolation for free) and
+    # `.env.test` with the test URL under PRIMARY_DATABASE_URL.
+    # Private (URLs carry whatever the app's config carries), and the
+    # 0.16.0 marker file is removed on the way past.
+    def write_env_files(dir, dev_env, test_url: nil)
+      FileUtils.rm_f(File.join(dir, LEGACY_MARKER_FILE))
+      return if dev_env.nil? && test_url.nil?
+
+      unless dev_env.nil? || dev_env.empty?
+        body = dotenv_body(dev_env.reject { |k, _v| k == "PRIMARY_DATABASE_URL" })
+        write_env_file(File.join(dir, ".env"), body)
+        # Same content under the env-specific name: a loader that
+        # prefers .env.development over .env finds identical values.
+        write_env_file(File.join(dir, ".env.development"), body)
+      end
+      return if test_url.nil? || test_url.to_s.empty?
+
+      write_env_file(File.join(dir, ".env.test"),
+        dotenv_body({ "PRIMARY_DATABASE_URL" => test_url }))
     end
 
-    def read_marker(dir)
-      path = File.join(dir, MARKER_FILE)
-      File.file?(path) ? File.read(path).strip : nil
+    def write_env_file(path, body)
+      File.write(path, body)
+      File.chmod(0o600, path)
     end
 
-    # Keep the marker out of `git status` without touching the
-    # committed .gitignore: git's exclude file lives in the shared
-    # git dir, so one entry covers every worktree of the repo.
-    def exclude_marker(dir)
+    # dotenv format: single-quoted values (literal — no interpolation
+    # of a password's `$` or `#`), with the two escapes the dotenv
+    # grammar allows inside them.
+    def dotenv_body(env)
+      header = "# Per-worktree databases, written by yamine (worktree add).\n" \
+              "# Loaded by dotenv-rails / any dotenv loader; removed with this worktree.\n"
+      lines = env.map { |k, v| "#{k}='#{dotenv_escape(v.to_s)}'" }
+      "#{header}#{lines.join("\n")}\n"
+    end
+
+    def dotenv_escape(value)
+      value.gsub("\\") { "\\\\" }.gsub("'") { "\\'" }
+    end
+
+    # Keep files out of `git status` without touching the committed
+    # .gitignore: git's exclude file lives in the shared git dir, so
+    # entries cover every worktree of the repo. Idempotent per line.
+    def exclude_files(dir, names)
       out, status = Open3.capture2("git", "-C", dir, "rev-parse", "--git-path", "info/exclude")
       return unless status.success?
 
       path = out.strip
       path = File.expand_path(path, dir) unless path.start_with?("/")
-      return if File.file?(path) && File.read(path).lines.any? { |l| l.strip == MARKER_FILE }
-
       FileUtils.mkdir_p(File.dirname(path))
-      File.open(path, "a") { |f| f.puts MARKER_FILE }
+      existing = File.file?(path) ? File.read(path).lines.map(&:strip) : []
+      additions = Array(names).reject { |n| existing.include?(n) }
+      return if additions.empty?
+
+      File.open(path, "a") { |f| additions.each { |n| f.puts n } }
     rescue SystemCallError, IOError
       nil
     end

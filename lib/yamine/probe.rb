@@ -65,7 +65,11 @@ module Yamine
               url = "#{h[:adapter]}:#{db}"
             end
           end
-          { "name" => c.name, "database" => db, "url" => url }
+          { "name" => c.name, "database" => db, "url" => url,
+            # What DATABASE_URL held INSIDE the app — the discriminator
+            # between "no .env loader ran" (nil) and "loader ran but
+            # database.yml's url: keys took precedence over it".
+            "env_database_url" => ENV["DATABASE_URL"] }
         end
       puts "YAMINE_DBS=#{JSON.generate(rows)}"
     RUBY

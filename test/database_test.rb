@@ -473,18 +473,55 @@ class MultiDatabaseNamingTest < Minitest::Test
     end
   end
 
-  def test_marker_roundtrip_and_git_exclude
+  def test_env_files_roundtrip_quoting_and_exclude
     out, status = Open3.capture2("git", "init", "-q", @dir)
     raise "git init failed: #{out}" unless status.success?
 
-    Yamine::Database.write_marker(@dir, "myapp_fix")
-    assert_equal "myapp_fix", Yamine::Database.read_marker(@dir)
-    refute Yamine::Database.read_marker(File.join(@dir, "nope"))
+    dev_env = { "DATABASE_URL" => "postgres://u@h/app_dev_fix",
+                "PRIMARY_DATABASE_URL" => "postgres://u@h/app_dev_fix",
+                "CACHE_DATABASE_URL" => "postgres://u@h/app_dev_cache_fix" }
+    Yamine::Database.write_env_files(@dir, dev_env,
+      test_url: "postgres://p'w$rd@h/app_test_fix")
 
-    Yamine::Database.exclude_marker(@dir)
-    Yamine::Database.exclude_marker(@dir) # idempotent
-    exclude = File.join(@dir, ".git", "info", "exclude")
-    assert_includes File.readlines(exclude).map(&:strip), Yamine::Database::MARKER_FILE
+    env = File.read(File.join(@dir, ".env"))
+    assert_includes env, "DATABASE_URL='postgres://u@h/app_dev_fix'"
+    assert_includes env, "CACHE_DATABASE_URL='postgres://u@h/app_dev_cache_fix'"
+    refute_includes env, "PRIMARY_DATABASE_URL",
+      ".env must not pin PRIMARY — .env.test uses that key to win the test env"
+    # The env-specific twin carries identical dev values.
+    assert_equal env, File.read(File.join(@dir, ".env.development"))
+
+    test_env = File.read(File.join(@dir, ".env.test"))
+    # Order-independent test override: Rails checks PRIMARY_DATABASE_URL
+    # before DATABASE_URL, and only .env.test sets this key.
+    assert_includes test_env, "PRIMARY_DATABASE_URL='postgres://p\\'w$rd@h/app_test_fix'"
+
+    [".env", ".env.development", ".env.test"].each do |f|
+      mode = File.stat(File.join(@dir, f)).mode & 0o777
+      assert_equal 0o600, mode, "#{f} carries connection URLs — must be private"
+    end
+
+    Yamine::Database.exclude_files(@dir, Yamine::Database::ENV_FILES)
+    Yamine::Database.exclude_files(@dir, Yamine::Database::ENV_FILES) # idempotent
+    exclude = File.readlines(File.join(@dir, ".git", "info", "exclude"))
+    Yamine::Database::ENV_FILES.each do |f|
+      assert_equal 1, exclude.map(&:strip).count(f), "#{f} excluded exactly once"
+    end
+  end
+
+  def test_dotenv_escape_handles_quotes_and_backslashes
+    # Backslash and single quote are the two escapes the dotenv
+    # grammar recognizes inside single-quoted values.
+    assert_equal "a\\\\b\\'c", Yamine::Database.dotenv_escape("a\\b'c")
+  end
+
+  def test_write_env_files_removes_the_legacy_marker
+    File.write(File.join(@dir, "yamine-db-suffix-legacy"), "") # not it
+    File.write(File.join(@dir, ".yamine-db-suffix"), "old")
+    Yamine::Database.write_env_files(@dir, { "DATABASE_URL" => "postgres://u@h/x" })
+    refute File.exist?(File.join(@dir, ".yamine-db-suffix")),
+      "0.16.0's marker file is cleaned up on sight"
+    assert File.exist?(File.join(@dir, ".env"))
   end
 
   def test_state_file_is_private

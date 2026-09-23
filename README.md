@@ -171,7 +171,7 @@ yamine worktree clean                # tear down everything already merged
 
 `add` lands the worktree beside the repo, copies the gitignored
 per-checkout config (`config/local.yml`, `config/local.secrets`,
-`config/master.key`, `config/credentials/*.key`) the branch needs, runs
+`config/master.key`, and the development/test credential keys) the branch needs, runs
 `bundle install`, asks the app what databases it has, and provisions
 the whole set with schema — the next step is just `yamine start` in
 it.
@@ -200,12 +200,12 @@ guessed. `worktree add` boots `bin/rails runner` once inside the app so
 database.yml and credentials resolve exactly as the app would resolve
 them (yamine never parses config or touches a key), suffixes every
 database name with a collision-guarded per-worktree token, creates and
-schema-loads them, and records names plus server coordinates in the
-claim. Boot injects `DATABASE_URL` and one `NAME_DATABASE_URL` per
-configuration (Rails' own convention), so supervised processes are
-isolated even in an app that never heard of yamine. `remove`/`clean`
-drop the entire set as a unit — including from an orphaned claim whose
-directory is already gone, without the app booting.
+schema-loads them, prepares the test database, and records names plus
+server coordinates in the claim. Boot injects `DATABASE_URL` and one
+`NAME_DATABASE_URL` per configuration (Rails' own convention).
+`remove`/`clean` drop the entire set as a unit — including from an
+orphaned claim whose directory is already gone, without the app
+booting.
 
 ```bash
 yamine db describe          # what THIS checkout resolves to (passwords masked)
@@ -213,54 +213,71 @@ yamine db list              # every claim, every database under it
 yamine db create            # re-probe + provision (run after the app grows a database)
 ```
 
-**Hand-run commands.** Env injection only reaches processes yamine
-spawns; a `rails console`, `rails test`, or `db:migrate` you run by
-hand reads the environment you gave it. For those, opt the app in with
-the suffix hook — a one-time addition at the top of
-`config/database.yml`:
+**Two one-time app requirements, both boring:**
 
-```erb
-<%
-  yamine_suffix = begin
-    f = Rails.root.join(".yamine-db-suffix")
-    f.exist? ? f.read.strip : ""
-  rescue StandardError
-    ""
-  end
-  yamine_db_url = lambda do |url|
-    next url if yamine_suffix.empty? || url.nil? || url.to_s.empty?
-    require "uri"
-    begin
-      uri = URI.parse(url.to_s)
-      uri.path = "#{uri.path}_#{yamine_suffix}" if uri.path && uri.path != "/"
-      uri.to_s
-    rescue URI::InvalidURIError
-      url
-    end
-  end
-%>
-```
+1. *Component-form development/test config.* Environment overrides —
+   injected `DATABASE_URL`/`NAME_DATABASE_URL` and the per-worktree
+   `.env` — only apply to component keys (`database:`, `host:`). A
+   `url:` key (the usual credentials-driven style) takes precedence
+   over the *entire* environment: Rails skips URL-shaped configs when
+   merging environment variables, so nothing injected or loaded can
+   redirect them. Development and test should read like a plain Rails
+   file:
 
-Then wrap each database URL (and a bare test database name) with it:
+   ```yaml
+   default: &default
+     adapter: postgresql
+     encoding: unicode
+     host: <%= ENV.fetch("DB_HOST", "localhost") %>
+     username: postgres
 
-```yaml
-development:
-  primary:
-    url: <%= yamine_db_url.call(Rails.application.credentials.dig(:database, :primary, :url)) %>
-test:
-  database: <%= ENV.fetch("TEST_DATABASE_NAME") { "myapp_test#{yamine_suffix.empty? ? "" : "_#{yamine_suffix}"}" } %>
-```
+   development:
+     primary:
+       <<: *default
+       database: myapp_development
+     cache:
+       <<: *default
+       database: myapp_development_cache
+       migrations_paths: db/cache_migrate
 
-`worktree add` writes the `.yamine-db-suffix` token (git-excluded
-automatically) and then *proves* the hook works — you'll see
-`database.yml reads .yamine-db-suffix — hand-run commands are isolated
-too`. Without the hook, supervised boots are still fully isolated via
-env; `add` says exactly what the hand-run gap is. The test database is
-part of the claim too: created and schema-prepared on first add (so
-`rails test` runs as-is), dropped at teardown — never left behind.
+   staging:
+     primary: &primary_staging
+       <<: *default
+       url: <%= Rails.application.credentials.dig(:database, :primary, :url) %>
+   ```
 
-The main checkout has no marker file, so nothing changes there: its
-databases are its databases.
+   Staging/production keep doing whatever they do — yamine only ever
+   redirects development and test.
+
+2. *A dotenv loader* — `gem "dotenv-rails", groups: [:development, :test]`
+   (any dotenv loader works). That is what reads the files
+   `worktree add` writes into the worktree:
+
+   - `.env` / `.env.development` — the whole development set
+     (`DATABASE_URL` plus one `NAME_DATABASE_URL` per configuration),
+   - `.env.test` — the test URL under `PRIMARY_DATABASE_URL`, the key
+     Rails checks *before* `DATABASE_URL` for a flat test config, so it
+     wins regardless of the order a loader reads the files in.
+
+   Mode 0600, git-excluded automatically, removed with the worktree.
+   A hand-run `rails console`, `rails test`, or `db:migrate` in the
+   worktree therefore lands on the worktree's own databases — with
+   **zero yamine-specific code in `database.yml`, ever**.
+
+`worktree add` proves both after writing the files: you will see
+`.env loaded — hand-run commands are isolated too`. A warning instead
+names which requirement is missing — no loader ran, or the config is
+`url:`-shaped — and the exact fix. Supervised boots are isolated via
+injected env either way (component form permitting).
+
+Credential keys travel too: `config/master.key`,
+`config/credentials/development.key`, and
+`config/credentials/test.key` are copied at mode 0600. Production and
+staging keys stay in the main checkout where they belong.
+
+The main checkout never gets `.env` files or a suffix: its databases
+are its databases, untouched.
+
 
 ## Subdomains are opt-in
 

@@ -419,8 +419,9 @@ class WorktreeCommandTest < Minitest::Test
 end
 
 # Multi-database worktrees: the app is asked what it has (a fake
-# bin/rails that answers the probe like a conforming Rails app), the
-# whole set is claimed, suffixed, markered, and dropped as a unit.
+# bin/rails that answers the probe like a dotenv-loading Rails app),
+# the whole set is claimed, suffixed, written to .env, and dropped as
+# a unit.
 class WorktreeMultiDbTest < Minitest::Test
   def setup
     @root = File.realpath(Dir.mktmpdir)
@@ -442,9 +443,9 @@ class WorktreeMultiDbTest < Minitest::Test
     FileUtils.remove_entry(@root)
   end
 
-  # A conforming fake: probe answers base names before the marker
-  # exists and suffixed names after — exactly what a database.yml
-  # suffix hook produces.
+  # A conforming fake: base names until yamine writes .env, suffixed
+  # names after — exactly what dotenv-rails does to Rails. Keys are
+  # gitignored like a real credentials app.
   def make_rails_multi_app(dir)
     FileUtils.mkdir_p(dir)
     Dir.chdir(dir) do
@@ -463,16 +464,32 @@ class WorktreeMultiDbTest < Minitest::Test
             cmd: puma
             proxy: true
       YML
+      File.write(".gitignore", "config/credentials/*.key\nconfig/master.key\n")
+      FileUtils.mkdir_p("config/credentials")
+      File.write("config/credentials/development.key", "devkey")
+      File.write("config/credentials/test.key", "testkey")
+      File.write("config/credentials/production.key", "prodkey-NEVER-COPIED")
       File.write("bin/rails", <<~SH)
         #!/bin/sh
+        if [ "$1" = "db:test:prepare" ]; then
+          printf '%s' "$RAILS_ENV" > .test-prepare-env
+          exit 0
+        fi
         [ "$1" = "runner" ] || exit 0
-        S=""
-        [ -f .yamine-db-suffix ] && S=$(cat .yamine-db-suffix)
+        # Simulates a dotenv-loading app: .env / .env.test win when present.
         if [ "$RAILS_ENV" = "test" ]; then
-          # Flat test config: implicitly named "primary" in real Rails.
-          printf '%s\\n' "YAMINE_DBS=[{\\"name\\":\\"primary\\",\\"database\\":\\"app_test${S:+_$S}\\",\\"url\\":\\"postgres://u@127.0.0.1:5432/app_test${S:+_$S}\\"}]"
-        elif [ -n "$S" ]; then
-          printf '%s\\n' "YAMINE_DBS=[{\\"name\\":\\"primary\\",\\"database\\":\\"app_dev_$S\\",\\"url\\":\\"postgres://u@127.0.0.1:5432/app_dev_$S\\"},{\\"name\\":\\"cache\\",\\"database\\":\\"app_dev_cache_$S\\",\\"url\\":\\"postgres://u@127.0.0.1:5432/app_dev_cache_$S\\"}]"
+          if [ -f .env.test ]; then
+            V=$(sed -n "s/^PRIMARY_DATABASE_URL='\\(.*\\)'$/\\1/p" .env.test)
+            printf '%s\\n' "YAMINE_DBS=[{\\"name\\":\\"primary\\",\\"database\\":\\"${V##*/}\\",\\"url\\":\\"$V\\"}]"
+          else
+            printf '%s\\n' 'YAMINE_DBS=[{"name":"primary","database":"app_test","url":"postgres://u@127.0.0.1:5432/app_test"}]'
+          fi
+          exit 0
+        fi
+        if [ -f .env ]; then
+          D=$(sed -n "s/^DATABASE_URL='\\(.*\\)'$/\\1/p" .env)
+          C=$(sed -n "s/^CACHE_DATABASE_URL='\\(.*\\)'$/\\1/p" .env)
+          printf '%s\\n' "YAMINE_DBS=[{\\"name\\":\\"primary\\",\\"database\\":\\"${D##*/}\\",\\"url\\":\\"$D\\"},{\\"name\\":\\"cache\\",\\"database\\":\\"${C##*/}\\",\\"url\\":\\"$C\\"}]"
         else
           printf '%s\\n' 'YAMINE_DBS=[{"name":"primary","database":"app_dev","url":"postgres://u@127.0.0.1:5432/app_dev"},{"name":"cache","database":"app_dev_cache","url":"postgres://u@127.0.0.1:5432/app_dev_cache"}]'
         fi
@@ -530,7 +547,7 @@ class WorktreeMultiDbTest < Minitest::Test
     claims.find { |_, info| info["dir"] == dir }
   end
 
-  def test_add_claims_the_whole_suffixed_set_with_marker
+  def test_add_claims_the_whole_suffixed_set_with_env_files
     code, out, err = run_cli("add", "feature")
 
     assert_equal 0, code, "#{out}\n#{err}"
@@ -545,13 +562,24 @@ class WorktreeMultiDbTest < Minitest::Test
     assert_equal "postgres://u@127.0.0.1:5432/app_dev", info.dig("bases", "primary")
 
     wt = worktree_path("feature")
-    assert_equal suffix, Yamine::Database.read_marker(wt), "marker carries the same suffix"
+    env = File.read(File.join(wt, ".env"))
+    assert_includes env, "app_dev_#{suffix}"
+    assert_includes env, "app_dev_cache_#{suffix}"
+    refute_includes env, "PRIMARY_DATABASE_URL",
+      ".env must not pin PRIMARY — .env.test uses that key to win the test env"
+    assert_includes File.read(File.join(wt, ".env.test")), "app_test_#{suffix}",
+      ".env.test carries the test URL under PRIMARY_DATABASE_URL"
     exclude = File.read(File.join(@app, ".git", "info", "exclude"))
-    assert_includes exclude, Yamine::Database::MARKER_FILE
+    assert_includes exclude, ".env"
+    # Only the keys the worktree's own environments need came along.
+    assert File.file?(File.join(wt, "config", "credentials", "development.key"))
+    assert File.file?(File.join(wt, "config", "credentials", "test.key"))
+    refute File.exist?(File.join(wt, "config", "credentials", "production.key")),
+      "production keys have no business in a throwaway worktree"
 
     # Creation ran against every database (exists? stubbed true => none
     # created here), and the conformance proof passed loudly.
-    assert_includes out, "database.yml reads .yamine-db-suffix"
+    assert_includes out, ".env loaded — hand-run commands are isolated too"
     assert_includes out, "db       3 databases:"
     assert_includes out, "app_dev_#{suffix}"
     assert_includes out, "app_dev_cache_#{suffix}"
@@ -588,7 +616,11 @@ class WorktreeMultiDbTest < Minitest::Test
     assert_equal 0, code, "#{out}\n#{err}"
     _, info = claim_for_label("feature")
     refute_nil info&.dig("names", "primary")
-    assert_includes out, "database.yml reads .yamine-db-suffix"
+    assert_includes out, ".env loaded — hand-run commands are isolated too"
+    wt = worktree_path("feature")
+    assert_equal "test", File.read(File.join(wt, ".test-prepare-env")),
+      "db:test:prepare must run under RAILS_ENV=test — development would " \
+      "resolve the flat test config to the BASE name and purge main's test DB"
     # The test database was created empty by this pass — prepared so
     # `rails test` runs as-is (fake bin/rails exits 0 for any task).
     assert_includes out, "test database schema ready"
@@ -599,12 +631,13 @@ class WorktreeMultiDbTest < Minitest::Test
   end
 
   def test_non_conforming_app_still_boot_isolated_but_warns
-    # A database.yml without the suffix hook: probe post-marker still
-    # returns base names. Creation succeeds; the hand-run gap is said
-    # out loud at that exact moment.
+    # No dotenv loader: the probe still returns base names after .env
+    # is written. Creation succeeds; the hand-run gap is said out loud
+    # at that exact moment.
     File.write(File.join(@app, "bin", "rails"), <<~SH)
       #!/bin/sh
       [ "$1" = "runner" ] || exit 0
+      # Ignores .env on purpose — an app with no dotenv loader.
       if [ "$RAILS_ENV" = "test" ]; then
         printf '%s\\n' 'YAMINE_DBS=[{"name":"primary","database":"app_test","url":"postgres://u@127.0.0.1:5432/app_test"}]'
       else
@@ -620,8 +653,9 @@ class WorktreeMultiDbTest < Minitest::Test
     code, out, err = run_cli("add", "feature")
 
     assert_equal 0, code, "a non-conforming app still gets a bootable worktree:\n#{out}\n#{err}"
-    assert_includes err, "does not read .yamine-db-suffix"
-    assert_includes err, "Supervised boots are still isolated via env"
+    assert_includes err, "this app does not load .env"
+    assert_includes err, "Supervised boots are still isolated via injected env"
+    assert_includes err, "dotenv-rails"
     _, info = claim_for_label("feature")
     refute_nil info, "the claim and marker exist regardless"
   end

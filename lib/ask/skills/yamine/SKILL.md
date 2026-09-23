@@ -109,33 +109,39 @@ yamine worktree clean [--dry-run]
 
 `add` creates the git worktree beside the repo, copies the gitignored
 per-checkout config (`config/local.yml`, `config/local.secrets`,
-credential keys), runs `bundle install`, **asks the app what databases
-it has** (one `bin/rails runner` probe — database.yml and credentials
-resolve inside the app; yamine never parses them), and provisions the
-whole set with schema — every database of a multi-database app gets a
-per-worktree suffix, the test database included and schema-prepared, so
-`rails test` runs as-is. Then boot with `yamine start` inside it.
-`remove` and `clean` drop the entire set as a unit — including from an
-orphaned claim whose directory is gone, without booting the app — and
-`clean` never touches uncommitted work; unmerged branches survive
-everything except `remove --force`. Prefer `clean --dry-run` first, and
-`clean` over `rm -rf` — a removed worktree leaves no routes, databases,
-or stale hosts entries behind.
+`config/master.key`, and the development/test credential keys — never
+production/staging keys), runs `bundle install`, **asks the app what
+databases it has** (one `bin/rails runner` probe — database.yml and
+credentials resolve inside the app; yamine never parses them), and
+provisions the whole set with schema — every database of a
+multi-database app gets a per-worktree suffix, the test database
+included and schema-prepared, so `rails test` runs as-is. It writes
+`.env` / `.env.development` (the development set) and `.env.test`
+(`PRIMARY_DATABASE_URL` — the key Rails checks first for a flat test
+config) into the worktree, git-excluded automatically. Then boot with
+`yamine start` inside it. `remove` and `clean` drop the entire set as
+a unit — including from an orphaned claim whose directory is gone,
+without booting the app — and `clean` never touches uncommitted work;
+unmerged branches survive everything except `remove --force`. Prefer
+`clean --dry-run` first, and `clean` over `rm -rf` — a removed
+worktree leaves no routes, databases, or stale hosts entries behind.
 
 `yamine db describe` shows what the current checkout resolves to
 (passwords masked); `yamine db list` shows every database under every
 claim; `yamine db create` re-probes and self-heals (run it in each
 worktree after the app grows a database).
 
-Supervised boots are isolated via injected `DATABASE_URL` /
-`NAME_DATABASE_URL` env vars. **Hand-run commands are not** — unless
-the app carries the `.yamine-db-suffix` hook from the yamine README at
-the top of `config/database.yml`. `worktree add` writes that token
-file and prints `database.yml reads .yamine-db-suffix` when the hook
-is in place; if instead you see a warning that database.yml does not
-read it, hand-run `rails console` / `rails test` / `db:migrate` in
-that worktree would use the main checkout's databases — add the hook
-from the README, then `yamine db create`.
+Isolation reaches two places: supervised boots via injected
+`DATABASE_URL` / `NAME_DATABASE_URL` env vars, and hand-run commands
+(`rails console`, `rails test`, `db:migrate`) via the `.env` files —
+which require a dotenv loader in the app (`gem "dotenv-rails",
+groups: [:development, :test]`) and **component-form development/test
+config** (`database:` keys, never `url:` — a `url:` key takes
+precedence over the entire environment, so nothing injected or loaded
+can redirect it; staging/production URLs are fine, yamine never
+touches those envs). `worktree add` verifies both and prints
+`.env loaded — hand-run commands are isolated too`; its warning names
+exactly which requirement is missing and the fix.
 
 ## Subdomains are opt-in
 

@@ -586,26 +586,25 @@ module Yamine
       # Worktree-add (and `yamine db create` in a worktree): turn a
       # probe of the app's real databases into a provisioned,
       # self-describing claim. Names come from the app, the suffix
-      # from the directory; claim + marker are written BEFORE any
+      # from the directory; claim + .env files are written BEFORE any
       # database is created, so a failure mid-way leaves a state the
       # next `yamine db create` or boot can finish from — never a
       # half-named set with no record of it.
       #
       # Returns the final names; raises Error only for conditions the
-      # user must fix (name budget, server down, app broken by its own
-      # suffix hook) — those keep the worktree and the claim.
+      # user must fix (name budget, server down, .env breaking the
+      # app's boot) — those keep the worktree and the claim.
       def provision_multidb(ctx, dir, claim_key, rows)
         env_name = rails_env
-        # A marker from a previous run means the probe answered with
-        # names the app already suffixed — strip that suffix before
-        # fitting, or this pass would double it and yamine would
-        # provision a set the app never connects to.
-        marker = Database.read_marker(dir)
-        if marker && !marker.empty?
-          rows = strip_marker_suffix(rows, marker)
-        end
+        # Re-provisioning a worktree whose .env exists: the app (via
+        # dotenv) resolves SUFFIXED names — strip the claim's stored
+        # suffix before fitting, or this pass would double it and
+        # yamine would provision a set the app never connects to.
+        prior = Database.load_map(ctx.store.dir)[claim_key]
+        prior_suffix = prior.is_a?(Hash) ? prior["suffix"] : nil
+        rows = strip_suffix(rows, prior_suffix)
         # The test environment's database joins the claim: worktree
-        # tests run against it (the same marker suffixes it), and
+        # tests run against it (.env.test carries its URL), and
         # teardown must drop it — a leaked test database per worktree
         # is exactly the leftover this exists to prevent. Test configs
         # are flat (implicitly named "primary"), so the claim key is
@@ -613,7 +612,7 @@ module Yamine
         # A test env the app cannot answer (missing test credentials,
         # say) degrades to a dev-only claim; `yamine db create` heals.
         test_rows = Probe.rails_databases(dir, env: "test")
-        test_rows = strip_marker_suffix(test_rows, marker) if test_rows && marker && !marker.empty?
+        test_rows = strip_suffix(test_rows, prior_suffix)
         test_pairs = (test_rows && Probe.server_backed(test_rows) || [])
           .map { |r| [env_namespaced_key(r["name"], "test"), r] }
 
@@ -638,8 +637,14 @@ module Yamine
           "claimed_at" => Time.now.utc.iso8601,
           "suffix" => fitted, "names" => names, "bases" => bases)
         Database.save_map(ctx.store.dir, map)
-        Database.write_marker(dir, fitted)
-        Database.exclude_marker(dir)
+        # The environment files: what hand-run commands read. Written
+        # before creation so the verify probe below can see them.
+        dev_env = db_env_for(
+          names.reject { |cfg, _| cfg == "test" || cfg.start_with?("test_") }, bases)
+        test_url = names["test"] &&
+          Database.url_for(names["test"], base_for(bases, "test"))
+        Database.write_env_files(dir, dev_env, test_url: test_url)
+        Database.exclude_files(dir, Database::ENV_FILES)
 
         # An empty test database is worse than none: Rails won't
         # auto-load schema into it (verified — first `rails test`
@@ -659,8 +664,14 @@ module Yamine
         end
 
         if test_needs_schema
+          # RAILS_ENV=test, not development: dotenv must load .env.test
+          # (PRIMARY_DATABASE_URL = this worktree's test URL) AND the
+          # environment-override merge only applies to the CURRENT
+          # env's configs — under development the flat test config
+          # would resolve to the base name and purge+load the MAIN
+          # checkout's test database instead of this worktree's.
           prepared = Dir.chdir(dir) do
-            system({ "RAILS_ENV" => rails_env }, "sh", "-c", "bin/rails db:test:prepare",
+            system({ "RAILS_ENV" => "test" }, "sh", "-c", "bin/rails db:test:prepare",
               out: File::NULL, err: File::NULL)
           end
           if prepared
@@ -670,16 +681,16 @@ module Yamine
           end
         end
 
-        verify_marker_conformance(dir, names)
+        verify_env_loading(dir, names)
         names
       end
 
-      def strip_marker_suffix(rows, marker)
-        return rows if marker.nil? || marker.empty?
+      def strip_suffix(rows, suffix)
+        return rows if rows.nil? || suffix.nil? || suffix.empty?
 
         rows.map do |r|
-          if r["database"].end_with?("_#{marker}")
-            r.merge("database" => r["database"].delete_suffix("_#{marker}"))
+          if r["database"].end_with?("_#{suffix}")
+            r.merge("database" => r["database"].delete_suffix("_#{suffix}"))
           else
             r
           end
@@ -692,20 +703,21 @@ module Yamine
         cfg_name == "primary" ? env : "#{env}_#{cfg_name}"
       end
 
-      # The proof, not the promise: re-probe now that the marker file
-      # is in place. Matching names mean database.yml reads it —
-      # hand-run console/test/migrate commands are isolated too.
-      # Mismatch is not fatal (supervised boots still isolate via
-      # env), but it is the one gap worth shouting about at the exact
-      # moment of creation. A probe that cannot run at all after
-      # writing the marker IS fatal: the app no longer boots, and the
-      # marker's own authorship is the likely reason.
-      def verify_marker_conformance(dir, names)
+      # The proof, not the promise: re-probe now that .env exists.
+      # Matching names mean something inside the app loads .env
+      # (dotenv-rails or any dotenv loader) — hand-run console/test/
+      # migrate commands are isolated too. Mismatch is not fatal
+      # (supervised boots isolate via injected env regardless), but
+      # it is the one gap worth shouting about at the exact moment of
+      # creation. A probe that cannot run at all after writing .env
+      # IS fatal: the app no longer boots, and .env's own authorship
+      # is the likely reason.
+      def verify_env_loading(dir, names)
         rows = Probe.rails_databases(dir)
         unless rows
           raise Error,
-            "the app no longer boots after writing #{Database::MARKER_FILE} — " \
-            "check the suffix hook at the top of config/database.yml"
+            "the app no longer boots after writing .env — " \
+            "check the generated .env files in #{dir}"
         end
 
         actual = rows.to_h { |r| [r["name"], r["database"]] }
@@ -714,20 +726,37 @@ module Yamine
         # for them either way; skip, don't flag.
         mismatched = names.reject { |cfg, want| !actual.key?(cfg) || actual[cfg] == want }
         if mismatched.empty?
-          puts "  database.yml reads #{Database::MARKER_FILE} — hand-run commands are isolated too"
+          puts "  .env loaded — hand-run commands are isolated too"
         else
           cfg, want = mismatched.first
-          warn "  WARNING: config/database.yml does not read #{Database::MARKER_FILE} " \
-               "(#{cfg} resolves to #{actual[cfg].inspect}, expected #{want.inspect})."
-          warn "    Supervised boots are still isolated via env, but `rails console`, " \
-               "`rails test`, and `db:migrate` run by hand in this worktree would use the main checkout's databases."
-          warn "    Add the suffix hook from the yamine README to database.yml, then re-run `yamine db create`."
+          env_url = rows.first["env_database_url"]
+          if env_url && !env_url.empty?
+            # The loader DID run — DATABASE_URL reached the app — yet
+            # resolution ignored it. database.yml supplies `url:` keys
+            # (credentials-style), and for those Rails gives the FILE
+            # precedence: merge_db_environment_variables skips configs
+            # that are already URL-shaped. No environment channel,
+            # spawned or loaded, can redirect this app in that form.
+            warn "  WARNING: #{cfg} resolves to #{actual[cfg].inspect} even though " \
+                 "DATABASE_URL says #{env_url.split("/").last.inspect}."
+            warn "    database.yml's `url:` keys take precedence over the environment in this configuration —"
+            warn "    neither injected env nor .env can redirect them. Switch development/test to"
+            warn "    component form (database:, host:, username:) so DATABASE_URL and .env apply —"
+            warn "    see the yamine README's multi-database section."
+          else
+            warn "  WARNING: this app does not load .env " \
+                 "(#{cfg} resolves to #{actual[cfg].inspect}, expected #{want.inspect})."
+            warn "    Supervised boots are still isolated via injected env, but `rails console`, " \
+                 "`rails test`, and `db:migrate` run by hand in this worktree would use the main checkout's databases."
+            warn "    Fix once: add `gem \"dotenv-rails\", groups: [:development, :test]` to the Gemfile — " \
+                 "any dotenv loader works."
+          end
         end
       rescue StandardError => e
         raise Error, e.message if e.is_a?(Error)
 
         raise Error,
-          "the app no longer boots after writing #{Database::MARKER_FILE}: #{e.message}"
+          "the app no longer boots after writing .env: #{e.message}"
       end
 
       # Top-level `db: false` opts out of per-worktree databases.

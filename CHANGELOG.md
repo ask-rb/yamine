@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-09-23
+
+### Added
+
+- **Per-worktree `.env` files — hand-run isolation without touching the
+  app's config.** `worktree add` writes `.env` and `.env.development`
+  (the whole development set: `DATABASE_URL` + one `NAME_DATABASE_URL`
+  per configuration) and `.env.test` (`PRIMARY_DATABASE_URL` — the key
+  Rails checks *before* `DATABASE_URL` for a flat test config, so the
+  test URL wins no matter what order a loader reads the files in).
+  Any dotenv loader picks them up — hand-run `rails console`,
+  `rails test`, and `db:migrate` land on the worktree's databases with
+  zero yamine-specific code in `database.yml`. Mode 0600, git-excluded
+  automatically, removed with the worktree.
+
+### Changed
+
+- **`.yamine-db-suffix` (0.16.0) is replaced by the `.env` files above.**
+  The database.yml suffix hook is no longer needed — apps keep a plain
+  boring config. Legacy marker files are deleted on sight.
+- **The conformance check now diagnoses precisely.** `worktree add`
+  re-probes after writing `.env` and distinguishes the two ways an app
+  can fail to isolate hand-run commands: no dotenv loader loaded the
+  file (fix: one Gemfile line), vs `database.yml` supplies `url:` keys,
+  which Rails gives *precedence over the entire environment* —
+  `merge_db_environment_variables` skips URL-shaped configs, so neither
+  injected env nor `.env` can ever redirect them (fix: component form —
+  `database:`, `host:`, `username:` — for development/test).
+- **Worktrees copy only the credential keys their own environments
+  need**: `config/master.key`, `config/credentials/development.key`,
+  `config/credentials/test.key`. Production and staging keys no longer
+  travel into throwaway directories.
+
+### Fixed
+
+- **`worktree add` could purge the MAIN checkout's test database.**
+  The per-worktree test schema preparation ran under
+  `RAILS_ENV=development`, where the flat test config resolves to the
+  BASE name (the environment-override merge only applies to the current
+  environment's configs) — so `db:test:prepare` purged and reloaded
+  *main's* `myrr_markdown_test` during a worktree add, observed live.
+  It now runs under `RAILS_ENV=test`, where dotenv loads `.env.test`
+  and the override lands on the worktree's own test database; a
+  regression test pins the environment.
+
 ## [0.16.0] — 2026-09-23
 
 ### Added
