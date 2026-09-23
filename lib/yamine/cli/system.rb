@@ -861,18 +861,24 @@ module Yamine
         puts "  # Prefer Kamal multi-host for production; single-host preview above is fine for ephemeral branches."
       end
 
-      # Per-worktree databases: list/create/drop, plus orphan cleanup.
-      # `db list` shows every claimed database with its worktree dir.
-      # `db create` resolves this worktree's name and creates it.
-      # `db drop <name>` drops one database (refuses without --force
-      # when its worktree still exists).
+      # Per-worktree databases: list/create/drop/describe.
+      # `db list` shows every claim and every database under it.
+      # `db create` asks the app what it has and provisions it — the
+      # suffixed set in a worktree, the base set in the main checkout
+      # (self-healing: run it after adding a database to the app).
+      # `db drop <name>` drops a claim's whole set — by claim key or
+      # by any actual database name (refuses without --force when its
+      # worktree still exists).
+      # `db describe` asks the app what it has and prints it — the
+      # probe behind create, exposed for debugging.
       def db(ctx, args)
         sub = args.first
         case sub
         when "list", nil then db_list(ctx)
         when "create" then db_create(ctx)
         when "drop" then db_drop(ctx, args[1..] || [])
-        else raise Error, "Usage: yamine db [list|create|drop <name> [--force]]"
+        when "describe" then db_describe(ctx)
+        else raise Error, "Usage: yamine db [list|create|drop <name> [--force]|describe]"
         end
       end
 
@@ -880,30 +886,62 @@ module Yamine
         map = Database.load_map(ctx.store.dir)
         if map.empty?
           puts "No worktree databases claimed yet."
-          puts "Boot an app with a DATABASE_URL template to create one."
+          puts "Run `yamine worktree add <branch>` — or `yamine db create` — to claim one."
           return
         end
         map.each do |name, info|
           alive = File.directory?(info["dir"]) ? "" : " (worktree gone)"
           puts "  #{name}  ->  #{info["dir"]}#{alive}"
+          names = info.is_a?(Hash) ? info["names"] : nil
+          next unless names.is_a?(Hash) && !names.empty?
+
+          names.each_value { |db| puts "      db: #{db}" }
         end
       end
 
       def db_create(ctx)
-        resolved = Resolver.resolve(Dir.pwd)
-        name = Database.name_for(Dir.pwd, env: boot_env_name,
+        claim_key = Database.name_for(Dir.pwd, env: boot_env_name,
           state_dir: ctx.store.dir)
+        rows = Probe.rails_databases(Dir.pwd)
+        server = rows && Probe.server_backed(rows)
+
+        if server && !server.empty?
+          if Database.main_checkout?(Dir.pwd)
+            db_create_main(server)
+          else
+            names = BootCommand.provision_multidb(ctx, Dir.pwd, claim_key, server)
+            puts "Database set ready (#{names.size}):"
+            names.each_value { |db| puts "  #{db}" }
+          end
+          return
+        end
+
         template = drop_template
         unless template && !template.strip.empty?
           $stderr.puts "Error: no DATABASE_URL template found (ENV or env.clear in config/local.yml)."
           exit 1
         end
-        if Database.ensure_exists(name, template)
-          puts "Database #{name} ready."
+        if Database.ensure_exists(claim_key, template)
+          puts "Database #{claim_key} ready."
         else
-          $stderr.puts "Error: could not create #{name}. Check the database server is running."
+          $stderr.puts "Error: could not create #{claim_key}. Check the database server is running."
           exit 1
         end
+      end
+
+      # Main checkout: the databases ARE the app's own — no suffix, no
+      # marker, no claim names. Just make sure they exist.
+      def db_create_main(rows)
+        missing = rows.reject { |r| Database.exists?(r["database"], r["url"]) }
+        failed = missing.filter_map do |r|
+          r["database"] unless Database.ensure_exists(r["database"], r["url"])
+        end
+        unless failed.empty?
+          $stderr.puts "Error: could not create #{failed.join(', ')}. Check the database server."
+          exit 1
+        end
+        puts "Base databases ready (#{rows.size}):"
+        rows.each { |r| puts "  #{r["database"]}" }
       end
 
       def db_drop(ctx, args)
@@ -913,28 +951,69 @@ module Yamine
 
         map = Database.load_map(ctx.store.dir)
         info = map[name]
-        if info && File.directory?(info["dir"]) && !force
+        unless info
+          # A name from inside a claim identifies the claim — the set
+          # is the unit; half a suffixed set is orphan territory.
+          key, found = map.find { |_k, i| i.is_a?(Hash) && i.dig("names")&.value?(name) }
+          name, info = key, found if info.nil? && found
+        end
+        raise Error, "no claim named #{name.inspect} here — `yamine db list` shows what exists" unless info
+
+        if File.directory?(info["dir"]) && !force
           $stderr.puts "Error: worktree #{info["dir"]} still exists. Use --force to drop #{name} anyway."
           exit 1
         end
+
+        pairs = Database.claim_pairs(info) || begin
+          template = drop_template
+          unless template && !template.strip.empty?
+            $stderr.puts "Error: no DATABASE_URL template found (ENV or env.clear in config/local.yml) — cannot reach the server to drop #{name}."
+            exit 1
+          end
+          [[name, template]]
+        end
         template = drop_template
-        unless template && !template.strip.empty?
-          $stderr.puts "Error: no DATABASE_URL template found (ENV or env.clear in config/local.yml) — cannot reach the server to drop #{name}."
+        pairs = pairs.map { |db, tmpl| [db, (tmpl || template)] }
+
+        failed = false
+        pairs.each do |db, tmpl|
+          case Database.drop(db, tmpl)
+          when :dropped then puts "  dropped #{db}"
+          when :missing then puts "  #{db} did not exist — nothing to drop"
+          when :failed then failed = true
+          end
+        end
+        if failed
+          $stderr.puts "Error: could not drop part of #{name} — is the database server running? The claim is kept."
           exit 1
         end
-        case Database.drop(name, template)
-        when :dropped
-          map.delete(name)
-          Database.save_map(ctx.store.dir, map)
-          puts "Dropped #{name}."
-        when :missing
-          map.delete(name)
-          Database.save_map(ctx.store.dir, map)
-          puts "#{name} did not exist — nothing to drop (claim removed)."
-        when :failed
-          $stderr.puts "Error: could not drop #{name} — is the database server running? The claim is kept."
+
+        map.delete(name)
+        Database.save_map(ctx.store.dir, map)
+        puts "Dropped #{name}."
+      end
+
+      # The probe exposed: what THIS app, right here, resolves to —
+      # database.yml + credentials and all, asked inside the app so no
+      # key or parser is needed outside it. Passwords masked; this
+      # prints to terminals and CI logs.
+      def db_describe(_ctx)
+        rows = Probe.rails_databases(Dir.pwd)
+        unless rows
+          $stderr.puts "Error: could not ask this app for its databases."
+          $stderr.puts "  Is it a Rails app with a working `bin/rails runner`? (probe timed out or exited non-zero)"
           exit 1
         end
+        rows.each do |r|
+          kind = %i[postgres mysql].include?(Database.adapter_for(r["url"])) ? "server" : "local"
+          puts "  #{r["name"]} (#{kind})"
+          puts "      database: #{r["database"]}"
+          puts "      url:      #{mask_url(r["url"])}"
+        end
+      end
+
+      def mask_url(url)
+        url.to_s.sub(%r{\A([a-z0-9+]+://[^:/@]+):[^@]*@}, '\1:***@')
       end
 
       # Template for reaching the database server outside of boot:

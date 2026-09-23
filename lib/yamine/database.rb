@@ -32,6 +32,12 @@ module Yamine
 
     MAX_IDENTIFIER_BYTES = 63
     STATE_FILE = "databases.json"
+    # Written into a worktree at add time; the app's database.yml
+    # reads it and suffixes every database URL, so hand-run commands
+    # (console, test, db:migrate) land on the worktree's own
+    # databases too — env injection only ever reaches processes
+    # yamine spawns.
+    MARKER_FILE = ".yamine-db-suffix"
 
     # Database name for a worktree dir + env (development/test).
     # Main checkout (no worktree marker) keeps the bare name.
@@ -77,7 +83,12 @@ module Yamine
       if map.key?(name) && map[name]["dir"] != dir
         return nil
       end
-      map[name] = { "dir" => dir, "claimed_at" => Time.now.utc.iso8601 }
+      # Merge, don't replace: boot re-claims on every run, and a
+      # multi-database claim's suffix/names/bases are stored under
+      # this key — a fresh hash would erase them and orphan the whole
+      # set on the next drop.
+      map[name] = (map[name] || {}).merge("dir" => dir,
+        "claimed_at" => Time.now.utc.iso8601)
       save_map(state_dir, map)
       name
     rescue SystemCallError
@@ -93,10 +104,96 @@ module Yamine
       {}
     end
 
+    # Claim URLs carry database passwords (the app's own resolved
+    # config, probed at worktree-add time), so the state file is
+    # private — it held no secrets before multi-database claims.
     def save_map(state_dir, map)
       FileUtils.mkdir_p(state_dir)
-      File.write(File.join(state_dir, STATE_FILE), JSON.pretty_generate(map))
+      path = File.join(state_dir, STATE_FILE)
+      File.write(path, JSON.pretty_generate(map))
+      File.chmod(0o600, path)
     rescue SystemCallError
+      nil
+    end
+
+    # ── multi-database claims ─────────────────────────────────────
+    #
+    # A multi-database claim carries the whole set beside the usual
+    # dir/claimed_at:
+    #   suffix  the token every database name gains — also the marker
+    #           file's contents, the one string yamine and the app's
+    #           database.yml must agree on, byte for byte
+    #   names   config name -> actual database name
+    #   bases   config name -> the app's own URL (server coordinates
+    #           for create/drop; where the suffix gets inserted)
+    # Single-database claims predate this and have none of the three;
+    # every reader falls back to the claim key as the one name.
+
+    # The suffix for a worktree: the claim key minus the env. Base
+    # names already carry the environment (myrr_markdown_development),
+    # so appending "_development" a second time only burns identifier
+    # budget. The claim key keeps the env (and the collision guard);
+    # the suffix is what has to fit inside a database name.
+    def suffix_for(claim_name, env)
+      stripped = claim_name.delete_suffix("_#{env}")
+      stripped.empty? ? claim_name : stripped
+    end
+
+    # Fit the suffix so `base + "_" + suffix` stays within the
+    # identifier cap for ANY base: budget against the longest one.
+    # Fitting happens once, here, because the marker file holds the
+    # suffix and the app only concatenates — a hand-run `rails
+    # console` must arrive at byte-identical names with no truncation
+    # logic of its own. Returns nil when even a hash-shortened suffix
+    # cannot fit (a base name so long no suffix follows it); callers
+    # name the problem instead of guessing.
+    def fit_suffix(suffix, dir, base_databases)
+      longest = base_databases.map { |d| d.to_s.bytesize }.max || 0
+      budget = MAX_IDENTIFIER_BYTES - longest - 1
+      return suffix if budget.positive? && suffix.bytesize <= budget
+      return nil if budget < 8
+
+      keep = budget - 7
+      "#{suffix.byteslice(0, keep).gsub(/_+\z/, "")}_#{short_hash(dir)}"
+    end
+
+    # The actual database name for one base under a suffix. Raises
+    # rather than truncating: silent truncation would diverge from
+    # what the marker file produces inside the app, and yamine names
+    # and app names disagreeing is exactly the bug this prevents.
+    # fit_suffix makes this unreachable for fitted suffixes; the
+    # raise guards programmatic misuse.
+    def multiname(base_database, suffix)
+      name = "#{base_database}_#{suffix}"
+      raise ArgumentError,
+        "database name exceeds #{MAX_IDENTIFIER_BYTES} bytes: #{name}" if name.bytesize > MAX_IDENTIFIER_BYTES
+
+      name
+    end
+
+    def write_marker(dir, suffix)
+      File.write(File.join(dir, MARKER_FILE), "#{suffix}\n")
+    end
+
+    def read_marker(dir)
+      path = File.join(dir, MARKER_FILE)
+      File.file?(path) ? File.read(path).strip : nil
+    end
+
+    # Keep the marker out of `git status` without touching the
+    # committed .gitignore: git's exclude file lives in the shared
+    # git dir, so one entry covers every worktree of the repo.
+    def exclude_marker(dir)
+      out, status = Open3.capture2("git", "-C", dir, "rev-parse", "--git-path", "info/exclude")
+      return unless status.success?
+
+      path = out.strip
+      path = File.expand_path(path, dir) unless path.start_with?("/")
+      return if File.file?(path) && File.read(path).lines.any? { |l| l.strip == MARKER_FILE }
+
+      FileUtils.mkdir_p(File.dirname(path))
+      File.open(path, "a") { |f| f.puts MARKER_FILE }
+    rescue SystemCallError, IOError
       nil
     end
 
@@ -125,6 +222,29 @@ module Yamine
     # Databases whose worktree dirs no longer exist (for `worktree clean`).
     def orphaned(state_dir)
       load_map(state_dir).select { |_, v| !File.directory?(v["dir"]) }
+    end
+
+    # The multi-database claim under `key`, or nil — single-database
+    # claims (and foreign keys) simply have no names, and every reader
+    # falls back to the key itself as the one database name.
+    def multi_claim(state_dir, key)
+      info = load_map(state_dir)[key]
+      info if info.is_a?(Hash) && info["names"].is_a?(Hash) && !info["names"].empty?
+    end
+
+    # Every [database_name, server_url] pair a claim stands for: N
+    # pairs for a multi claim, nil for a legacy single claim (caller
+    # falls back to the key + its own template lookup). bases may lag
+    # names on older claims; a missing base falls back to the first —
+    # all of an app's databases live on one server in every layout
+    # yamine has seen.
+    def claim_pairs(info)
+      names = info.is_a?(Hash) ? info["names"] : nil
+      return nil if names.nil? || names.empty?
+
+      bases = info["bases"] || {}
+      default = bases.values.first
+      names.filter_map { |cfg, db| [db, (bases[cfg] || default)] }
     end
 
     # Adapter detection from DATABASE_URL scheme. Returns :postgres,
@@ -189,7 +309,11 @@ module Yamine
       return :failed unless reachable
 
       uri = URI.parse(database_url)
-      _out, status = Open3.capture2("dropdb", name, env: pg_env(uri))
+      # env as the FIRST positional (like ensure_postgres): Open3
+      # forwards kwargs to spawn, and spawn has no env: option — as a
+      # kwarg this raised ArgumentError on every real drop, crashing
+      # teardown after the routes were already stopped.
+      _out, status = Open3.capture2(pg_env(uri), "dropdb", name)
       return :dropped if status.success?
 
       reachable, exists = pg_state(name, database_url)
@@ -293,9 +417,12 @@ module Yamine
       args
     end
 
+    # PGHOST only when the URL names a host: an empty authority
+    # (postgres:///dbname) means the unix socket, and forcing
+    # 127.0.0.1 there would reach the wrong server — or none.
     def pg_env(uri)
       {
-        "PGHOST" => uri.host || "127.0.0.1",
+        "PGHOST" => (uri.host unless uri.host.to_s.empty?),
         "PGPORT" => (uri.port || 5432).to_s,
         "PGUSER" => URI.decode_www_form_component(uri.user || ENV["USER"].to_s),
         "PGPASSWORD" => uri.password ? URI.decode_www_form_component(uri.password) : nil

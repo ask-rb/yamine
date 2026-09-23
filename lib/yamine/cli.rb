@@ -94,7 +94,7 @@ module Yamine
           yamine trust                  Add local CA to trust store
           yamine clean                  Remove state and hosts entries
           yamine prune                  Remove stale routes
-          yamine db list|create|drop      Per-worktree databases
+          yamine db list|create|drop|describe   Per-worktree databases (multi-database aware)
           yamine worktree list|add|remove|clean   Worktrees: create, inspect, full cleanup
           yamine skills install           Install yamine skill into ~/.agents/skills/ (or --local)
           yamine proxy start|stop       Control the proxy

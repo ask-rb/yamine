@@ -158,6 +158,29 @@ class DatabaseBootWiringTest < Minitest::Test
     refute env.key?("DATABASE_URL")
   end
 
+  def test_child_env_injects_the_whole_database_env
+    store = Yamine::RouteStore.new(@dir)
+    runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
+    env = runner.send(:child_env, @dir, url: "https://x.localhost", port: 4001,
+      database_env: { "DATABASE_URL" => "postgres://u@h/a_fix",
+        "CACHE_DATABASE_URL" => "postgres://u@h/a_cache_fix" },
+      extra_env: { "DATABASE_URL" => "postgres://stray/injected", "API" => "x" })
+    assert_equal "postgres://u@h/a_fix", env["DATABASE_URL"],
+      "yamine's own keys win over the config's env, including for DATABASE_URL"
+    assert_equal "postgres://u@h/a_cache_fix", env["CACHE_DATABASE_URL"]
+    assert_equal "x", env["API"]
+  end
+
+  def test_child_env_legacy_database_url_still_works
+    store = Yamine::RouteStore.new(@dir)
+    runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
+    env = runner.send(:child_env, @dir, url: "https://x.localhost", port: 4001,
+      database_env: { "DATABASE_URL" => "postgres://u@h/both" },
+      database_url: "postgres://u@h/legacy")
+    assert_equal "postgres://u@h/both", env["DATABASE_URL"],
+      "the whole-set env takes precedence over the single-url argument"
+  end
+
   def test_db_commands_registered
     assert_includes Yamine::CLI::SUBCOMMANDS, "db"
     assert_includes Yamine::CLI::SUBCOMMANDS, "worktree"
@@ -214,6 +237,25 @@ class DatabaseWarningTest < Minitest::Test
     resolved = Yamine::Resolver.resolve(@dir)
     _out, err = capture_io { Yamine::CLI::BootCommand.send(:warn_missing_template, resolved) }
     assert_match(/WARNING/, err)
+  end
+
+  def test_main_checkout_rails_without_template_is_silent
+    # The main checkout's databases ARE the app's own databases —
+    # nothing to isolate, so the old false-alarm warning must not
+    # fire. A .git DIRECTORY marks main (worktrees have a .git file).
+    write_config("service: myapp\nprocesses:\n  web:\n    cmd: bin/rails s\n    proxy: true\n")
+    File.write(File.join(@dir, "config", "database.yml"), "development:\n  adapter: postgresql\n")
+    File.write(File.join(@dir, "config", "application.rb"), "module Myapp; class Application; end; end\n")
+    FileUtils.mkdir_p(File.join(@dir, ".git"))
+    ENV.delete("DATABASE_URL")
+    resolved = Yamine::Resolver.resolve(@dir)
+    ctx = Struct.new(:store).new(Struct.new(:dir).new(@state))
+    _out, err = capture_io do
+      created, env = Yamine::CLI::BootCommand.setup_database(ctx, resolved, "myapp_development")
+      refute created
+      assert_nil env
+    end
+    refute_match(/WARNING/, err, "main checkout must not warn about missing templates")
   end
 
   def test_no_warning_when_template_present_in_env_clear
@@ -372,5 +414,154 @@ class WorktreeCleanTest < Minitest::Test
     end
     assert_includes out, "did not exist — nothing to drop"
     refute Yamine::Database.load_map(@state).key?("ghost_development")
+  end
+end
+
+class MultiDatabaseNamingTest < Minitest::Test
+  def setup
+    @state = Dir.mktmpdir
+    @dir = File.join(Dir.tmpdir, "myapp-fix")
+    FileUtils.mkdir_p(@dir)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@state)
+    FileUtils.remove_entry(@dir)
+  end
+
+  def test_suffix_strips_env
+    assert_equal "myapp_fix", Yamine::Database.suffix_for("myapp_fix_development", "development")
+  end
+
+  def test_suffix_without_env_match_keeps_whole_claim
+    # A dir literally named "feature_development" must not lose part
+    # of itself — only an exact "_<env>" tail is stripped.
+    assert_equal "feature_development_staging",
+      Yamine::Database.suffix_for("feature_development_staging", "development")
+  end
+
+  def test_fit_suffix_keeps_short_suffix
+    assert_equal "fix", Yamine::Database.fit_suffix("fix", @dir, ["app_development"])
+  end
+
+  def test_fit_suffix_shortens_to_longest_base_budget
+    base = "b" * 50
+    fitted = Yamine::Database.fit_suffix("a" * 30, @dir, [base])
+    refute_nil fitted
+    assert_operator "#{base}_#{fitted}".bytesize, :<=, 63
+    assert_match(/_[0-9a-f]{6}\z/, fitted, "a shortened suffix carries the dir hash")
+    # Deterministic: same dir + same budget = same suffix (the marker
+    # file and the claim must agree across processes).
+    assert_equal fitted, Yamine::Database.fit_suffix("a" * 30, @dir, [base])
+  end
+
+  def test_fit_suffix_gives_up_when_base_leaves_no_room
+    assert_nil Yamine::Database.fit_suffix("suffix", @dir, ["b" * 60])
+  end
+
+  def test_multiname_concatenates
+    assert_equal "app_development_fix",
+      Yamine::Database.multiname("app_development", "fix")
+  end
+
+  def test_multiname_refuses_over_cap_rather_than_truncating
+    # Truncation here would diverge from the marker file's plain
+    # concatenation inside the app — the disagreement this all exists
+    # to prevent. Fail loudly instead.
+    assert_raises(ArgumentError) do
+      Yamine::Database.multiname("b" * 60, "suffix")
+    end
+  end
+
+  def test_marker_roundtrip_and_git_exclude
+    out, status = Open3.capture2("git", "init", "-q", @dir)
+    raise "git init failed: #{out}" unless status.success?
+
+    Yamine::Database.write_marker(@dir, "myapp_fix")
+    assert_equal "myapp_fix", Yamine::Database.read_marker(@dir)
+    refute Yamine::Database.read_marker(File.join(@dir, "nope"))
+
+    Yamine::Database.exclude_marker(@dir)
+    Yamine::Database.exclude_marker(@dir) # idempotent
+    exclude = File.join(@dir, ".git", "info", "exclude")
+    assert_includes File.readlines(exclude).map(&:strip), Yamine::Database::MARKER_FILE
+  end
+
+  def test_state_file_is_private
+    Yamine::Database.save_map(@state, { "k" => { "dir" => @dir } })
+    mode = File.stat(File.join(@state, Yamine::Database::STATE_FILE)).mode & 0o777
+    assert_equal 0o600, mode, "claims carry database URLs — the file must not be world-readable"
+  end
+
+  def test_reclaim_preserves_multi_fields
+    # Boot re-claims on every run; a fresh hash would erase the set
+    # and orphan every database at the next drop.
+    Yamine::Database.save_map(@state, {
+      "myapp_fix_development" => {
+        "dir" => @dir, "claimed_at" => "2026-01-01T00:00:00Z",
+        "suffix" => "myapp_fix",
+        "names" => { "primary" => "app_development_myapp_fix" },
+        "bases" => { "primary" => "postgres://u@h/app_development" }
+      }
+    })
+    Yamine::Database.name_for(@dir, env: "development", state_dir: @state)
+    info = Yamine::Database.load_map(@state)["myapp_fix_development"]
+    assert_equal "myapp_fix", info["suffix"]
+    assert_equal({ "primary" => "app_development_myapp_fix" }, info["names"])
+    assert_equal({ "primary" => "postgres://u@h/app_development" }, info["bases"])
+  end
+
+  def test_multi_claim_and_pairs
+    state = @state
+    Yamine::Database.save_map(state, {
+      "multi" => {
+        "dir" => @dir, "names" => { "primary" => "a", "cache" => "b" },
+        "bases" => { "primary" => "postgres://u@h/a", "cache" => "postgres://u@h/b" }
+      },
+      "single" => { "dir" => @dir }
+    })
+
+    claim = Yamine::Database.multi_claim(state, "multi")
+    assert_equal({ "primary" => "a", "cache" => "b" }, claim["names"])
+    assert_nil Yamine::Database.multi_claim(state, "single")
+    assert_nil Yamine::Database.multi_claim(state, "absent")
+
+    pairs = Yamine::Database.claim_pairs(claim).to_h
+    assert_equal "postgres://u@h/a", pairs["a"]
+    assert_equal "postgres://u@h/b", pairs["b"]
+    assert_nil Yamine::Database.claim_pairs({ "dir" => @dir })
+    assert_nil Yamine::Database.claim_pairs(nil)
+  end
+
+  def test_claim_pairs_base_lag_falls_back_to_first
+    claim = { "names" => { "primary" => "a", "cache" => "b" },
+              "bases" => { "primary" => "postgres://u@h/a" } }
+    pairs = Yamine::Database.claim_pairs(claim).to_h
+    assert_equal "postgres://u@h/a", pairs["b"], "all of an app's databases share one server"
+  end
+
+  def test_pg_env_omits_host_for_socket_urls
+    env = Yamine::Database.pg_env(URI.parse("postgres:///mydb"))
+    refute env.key?("PGHOST"), "socket URLs must not be forced onto 127.0.0.1"
+    env = Yamine::Database.pg_env(URI.parse("postgres://dbhost/mydb"))
+    assert_equal "dbhost", env["PGHOST"]
+  end
+end
+
+class DbEnvForTest < Minitest::Test
+  def test_primary_and_per_config_urls
+    env = Yamine::CLI::BootCommand.db_env_for(
+      { "primary" => "app_dev_fix", "cache" => "app_dev_cache_fix" },
+      { "primary" => "postgres://u@h/app_dev", "cache" => "postgres://u@h/app_dev_cache" }
+    )
+    assert_equal "postgres://u@h/app_dev_fix", env["DATABASE_URL"]
+    assert_equal "postgres://u@h/app_dev_fix", env["PRIMARY_DATABASE_URL"]
+    assert_equal "postgres://u@h/app_dev_cache_fix", env["CACHE_DATABASE_URL"]
+    refute env.key?("QUEUE_DATABASE_URL")
+  end
+
+  def test_missing_base_is_skipped_not_invented
+    env = Yamine::CLI::BootCommand.db_env_for({ "primary" => "x" }, {})
+    assert_empty env
   end
 end

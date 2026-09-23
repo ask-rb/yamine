@@ -2,8 +2,78 @@
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-09-23
+
+### Added
+
+- **Multi-database worktrees — the whole set, asked not guessed.**
+  `worktree add` now probes the app itself (`bin/rails runner` resolves
+  database.yml + credentials inside the app process; yamine never parses
+  config or touches a key) and provisions every database it declares:
+  each name gains a collision-guarded per-worktree suffix, the claim
+  records all names plus the server coordinates, schemas load once, and
+  `remove`/`clean` drop the entire set as a unit — orphaned worktrees
+  drop from the claim alone, without the app even booting. Boot injects
+  `DATABASE_URL` plus `NAME_DATABASE_URL` per configuration (Rails' own
+  convention), so supervised processes are isolated even in apps that
+  never heard of yamine. New surface: `yamine db describe` prints what
+  the app actually resolves (passwords masked), `db list` and
+  `worktree list` show every database under a claim, and `db create`
+  re-probes — run it after the app grows a database to self-heal every
+  worktree.
+- **`.yamine-db-suffix` — hand-run commands isolate too.** `add` writes
+  a token file (git-excluded automatically); a four-line suffix hook at
+  the top of `config/local.yml`'s sibling `database.yml` (see README)
+  makes a hand-run `rails console`, `rails test`, or `db:migrate` in
+  the worktree resolve to the worktree's databases — env injection only
+  ever reaches processes yamine spawns. Conformance is proven at
+  creation ("database.yml reads .yamine-db-suffix"); an app without the
+  hook still gets fully isolated boots via env, and gets told exactly
+  what the gap is at that moment.
+- **The test database joins the claim.** It is probed and suffixed like
+  the rest, schema-prepared on first creation (`db:test:prepare` — Rails
+  will not load schema into an empty test database by itself), and
+  dropped at teardown — a fresh worktree runs `rails test` as-is, and
+  no suffixed test database is ever left behind.
+- **Credential keys travel to worktrees.** `add` now copies
+  `config/master.key` and `config/credentials/*.key` (mode 0600) with
+  the rest of the per-checkout config — a credentials app could not
+  even boot in a fresh worktree before, let alone resolve its
+  databases.
+
+### Changed
+
+- **The main checkout of a Rails app boots in silence.** The
+  "app looks database-backed but no DATABASE_URL template found"
+  warning no longer fires on a main checkout — the app's own databases
+  ARE its databases; isolation is a worktree concern, and worktrees
+  get it from the probe.
+- **`clean` no longer gets stuck forever on unresolvable legacy
+  claims.** A pre-multi-database claim whose app declares no template
+  (credentials apps never did) could never be resolved by any future
+  command, so every `worktree clean` anywhere failed on it until it was
+  removed by hand. Such claims are now forgotten with a warning that
+  names the database, so a real leftover stays droppable by hand while
+  `clean` moves on.
+- The claims file (`databases.json`) is written mode 0600 —
+  multi-database claims carry the app's resolved connection URLs.
+
 ### Fixed
 
+- **Every real Postgres drop has always crashed.** `pg_drop` passed
+  the environment as a keyword to `Open3.capture2` (spawn takes it
+  positionally), so the moment a `dropdb` was actually attempted —
+  `worktree remove`, `worktree clean`, any teardown against a reachable
+  server — it raised `ArgumentError` mid-teardown, after routes were
+  already stopped. Unit tests never saw it (an unreachable server
+  returns before the spawn). Drops now run, verified against a real
+  five-database app end to end.
+- **Boots of dependency-less Node stubs failed forever.** A committed
+  `package.json` with no dependencies (`{}`) demanded a `node_modules`
+  directory that `npm install` itself will never create — every fresh
+  clone and worktree of such an app failed its pre-flight. The check
+  now fires only when the manifest actually declares dependencies (an
+  unparseable manifest keeps the old conservative behavior).
 - **A hostname with no route answers 503, not 404.** The proxy was
   answering 404 for "no app registered for this hostname" — the same status
   an app gives for a path it does not have. A machine client (a health

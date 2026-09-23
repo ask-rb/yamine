@@ -170,9 +170,11 @@ yamine worktree clean                # tear down everything already merged
 ```
 
 `add` lands the worktree beside the repo, copies the gitignored
-per-checkout config (`config/local.yml`, `config/local.secrets`) the
-branch needs, runs `bundle install`, and pre-creates the per-worktree
-database with schema — the next step is just `yamine start` in it.
+per-checkout config (`config/local.yml`, `config/local.secrets`,
+`config/master.key`, `config/credentials/*.key`) the branch needs, runs
+`bundle install`, asks the app what databases it has, and provisions
+the whole set with schema — the next step is just `yamine start` in
+it.
 
 `clean` is the done-and-merged sweep: it tears down every worktree
 whose branch is merged (stop, drop database, remove worktree, delete
@@ -189,6 +191,76 @@ yamine                                          # -> https://myapp.localhost
 yamine --variant demo                           # -> https://demo.myapp.localhost
 yamine --tld preview.example.com                # your own domain (OAuth parity)
 ```
+
+### Multi-database apps
+
+A Rails multi-database app (five databases is normal: primary, cache,
+queue, cable, errors) gets **the whole set** per worktree — asked, not
+guessed. `worktree add` boots `bin/rails runner` once inside the app so
+database.yml and credentials resolve exactly as the app would resolve
+them (yamine never parses config or touches a key), suffixes every
+database name with a collision-guarded per-worktree token, creates and
+schema-loads them, and records names plus server coordinates in the
+claim. Boot injects `DATABASE_URL` and one `NAME_DATABASE_URL` per
+configuration (Rails' own convention), so supervised processes are
+isolated even in an app that never heard of yamine. `remove`/`clean`
+drop the entire set as a unit — including from an orphaned claim whose
+directory is already gone, without the app booting.
+
+```bash
+yamine db describe          # what THIS checkout resolves to (passwords masked)
+yamine db list              # every claim, every database under it
+yamine db create            # re-probe + provision (run after the app grows a database)
+```
+
+**Hand-run commands.** Env injection only reaches processes yamine
+spawns; a `rails console`, `rails test`, or `db:migrate` you run by
+hand reads the environment you gave it. For those, opt the app in with
+the suffix hook — a one-time addition at the top of
+`config/database.yml`:
+
+```erb
+<%
+  yamine_suffix = begin
+    f = Rails.root.join(".yamine-db-suffix")
+    f.exist? ? f.read.strip : ""
+  rescue StandardError
+    ""
+  end
+  yamine_db_url = lambda do |url|
+    next url if yamine_suffix.empty? || url.nil? || url.to_s.empty?
+    require "uri"
+    begin
+      uri = URI.parse(url.to_s)
+      uri.path = "#{uri.path}_#{yamine_suffix}" if uri.path && uri.path != "/"
+      uri.to_s
+    rescue URI::InvalidURIError
+      url
+    end
+  end
+%>
+```
+
+Then wrap each database URL (and a bare test database name) with it:
+
+```yaml
+development:
+  primary:
+    url: <%= yamine_db_url.call(Rails.application.credentials.dig(:database, :primary, :url)) %>
+test:
+  database: <%= ENV.fetch("TEST_DATABASE_NAME") { "myapp_test#{yamine_suffix.empty? ? "" : "_#{yamine_suffix}"}" } %>
+```
+
+`worktree add` writes the `.yamine-db-suffix` token (git-excluded
+automatically) and then *proves* the hook works — you'll see
+`database.yml reads .yamine-db-suffix — hand-run commands are isolated
+too`. Without the hook, supervised boots are still fully isolated via
+env; `add` says exactly what the hand-run gap is. The test database is
+part of the claim too: created and schema-prepared on first add (so
+`rails test` runs as-is), dropped at teardown — never left behind.
+
+The main checkout has no marker file, so nothing changes there: its
+databases are its databases.
 
 ## Subdomains are opt-in
 
@@ -226,7 +298,7 @@ yamine open [name]            # open the app URL in a browser
 yamine trust                  # add local CA to system trust store
 yamine clean                  # remove state and hosts entries
 yamine prune                  # remove stale routes
-yamine db list|create|drop    # per-worktree databases
+yamine db list|create|drop|describe    # per-worktree databases (multi-database aware)
 yamine worktree list|add|remove|clean   # worktree lifecycle
 yamine stop                   # stop this app's backend + routes
 yamine restart                # touch tmp/restart.txt (managed apps reboot)

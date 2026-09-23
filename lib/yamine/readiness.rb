@@ -68,7 +68,8 @@ module Yamine
     end
 
     # Pre-flight: verify runtime dependencies before spawning anything.
-    # Ruby (bundle check), Node (node_modules present). Returns [ok, fix].
+    # Ruby (bundle check), Node (node_modules present — but only when the
+    # manifest actually declares dependencies). Returns [ok, fix].
     # Fast-fails with the fix instead of letting Puma crash-loop for 60s.
     def check_deps(dir = Dir.pwd)
       gemfile = File.join(dir, "Gemfile")
@@ -80,12 +81,36 @@ module Yamine
         end
       end
       package = File.join(dir, "package.json")
-      if File.file?(package) && !File.directory?(File.join(dir, "node_modules"))
+      if File.file?(package) && !File.directory?(File.join(dir, "node_modules")) &&
+         package_declares_dependencies?(package)
         return [false, "node_modules missing — run `npm install` in #{dir}"]
       end
       [true, nil]
     rescue SystemCallError => e
       [false, e.message.lines.first&.strip]
+    end
+
+    # Does this manifest need an install at all? A stub `{}`
+    # (dependency-less apps keep one so tooling finds a manifest) has
+    # nothing to install — `npm install` creates no node_modules for
+    # it — and demanding the directory would fail every fresh clone
+    # and worktree of such an app forever. An unreadable manifest
+    # keeps the old directory check: honest conservatism.
+    def package_declares_dependencies?(path)
+      data = JSON.parse(File.read(path))
+      return false unless data.is_a?(Hash)
+
+      %w[dependencies devDependencies optionalDependencies peerDependencies workspaces]
+        .any? do |key|
+          value = data[key]
+          if value.is_a?(Hash) || value.is_a?(Array)
+            !value.empty?
+          else
+            !value.nil?
+          end
+        end
+    rescue JSON::ParserError, SystemCallError
+      true
     end
 
     # Poll an HTTP route until healthy or timeout. Healthy = healthcheck

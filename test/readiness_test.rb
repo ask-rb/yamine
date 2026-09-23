@@ -46,9 +46,44 @@ class ReadinessCheckDepsTest < Minitest::Test
     FileUtils.remove_entry(dir) if dir
   end
 
-  def test_node_modules_missing_when_package_json_present
+  def test_node_modules_missing_when_manifest_declares_dependencies
     dir = Dir.mktmpdir
-    File.write(File.join(dir, "package.json"), '{"name":"x"}')
+    File.write(File.join(dir, "package.json"),
+      '{"name":"x","dependencies":{"left-pad":"^1.0.0"}}')
+    ok, fix = Yamine::Readiness.check_deps(dir)
+    refute ok
+    assert_match(/node_modules missing/, fix)
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  def test_dependencyless_manifest_needs_no_node_modules
+    # A stub {} (or name-only) manifest has nothing to install —
+    # npm creates no node_modules for it — so a fresh clone or
+    # worktree of a dependency-less app must still boot.
+    ["{}", '{"name":"x"}'].each do |manifest|
+      dir = Dir.mktmpdir
+      File.write(File.join(dir, "package.json"), manifest)
+      ok, fix = Yamine::Readiness.check_deps(dir)
+      assert ok, "expected #{manifest} to pass, got #{fix}"
+    ensure
+      FileUtils.remove_entry(dir) if dir
+    end
+  end
+
+  def test_workspaces_manifest_counts_as_dependencies
+    dir = Dir.mktmpdir
+    File.write(File.join(dir, "package.json"), '{"workspaces":["packages/*"]}')
+    ok, fix = Yamine::Readiness.check_deps(dir)
+    refute ok
+    assert_match(/node_modules missing/, fix)
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  def test_unparseable_manifest_keeps_the_directory_check
+    dir = Dir.mktmpdir
+    File.write(File.join(dir, "package.json"), "not json at all")
     ok, fix = Yamine::Readiness.check_deps(dir)
     refute ok
     assert_match(/node_modules missing/, fix)

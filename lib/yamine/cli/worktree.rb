@@ -25,9 +25,24 @@ module Yamine
       module_function
 
       # Per-checkout config that git does not carry: a fresh worktree
-      # boots without these (missing secrets, no proxy config) — the
-      # single largest follow-up cost of a new worktree.
-      LOCAL_CONFIG_FILES = %w[config/local.yml config/local.secrets].freeze
+      # boots without these — missing secrets, no proxy config, and (for
+      # credentials apps) no decryption key, which stops Rails before it
+      # can even read database.yml. The single largest follow-up cost of
+      # a new worktree, now carried automatically.
+      LOCAL_CONFIG_FILES = %w[config/local.yml config/local.secrets config/master.key].freeze
+      # Rails 7.1+ per-env credentials: development.key & co are
+      # gitignored exactly like master.key and equally fatal without.
+      CREDENTIALS_KEY_GLOB = "config/credentials/*.key"
+
+      # The static list plus whatever key files this checkout has, plus
+      # the worktree marker: everything yamine writes or copies that
+      # must never read as uncommitted work.
+      def local_config_files(dir)
+        keys = Dir.glob(File.join(dir, CREDENTIALS_KEY_GLOB)).map do |path|
+          path.sub(%r{\A#{Regexp.escape(dir.chomp("/"))}/?}, "")
+        end
+        LOCAL_CONFIG_FILES + keys + [Database::MARKER_FILE]
+      end
 
       def run(ctx, args)
         sub = args.first
@@ -52,7 +67,10 @@ module Yamine
           default_branch = Worktrees.default_branch(repo)
           Worktrees.list(repo).each do |entry|
             next if entry.bare
-            puts "  #{entry_line(entry, claim_for(map, entry.path), repo, default_branch)}"
+
+            claim = claim_for(map, entry.path)
+            puts "  #{entry_line(entry, claim, repo, default_branch)}"
+            print_claim_databases(claim)
             printed = true
           end
         end
@@ -66,14 +84,17 @@ module Yamine
       def entry_line(entry, claim, repo, default_branch)
         name = entry.main? ? "main" : (entry.branch || "(detached)")
         line = "#{name}  #{entry.path}"
-        line += "  db #{claim[0]}" if claim
+        if claim
+          names = claim[1].is_a?(Hash) ? claim[1]["names"] : nil
+          line += names && !names.empty? ? "  db #{names.size} databases" : "  db #{claim[0]}"
+        end
 
         flags = []
         flags << "main checkout" if entry.main?
         flags << "detached" if entry.detached && !entry.main?
         flags << "dir gone" unless entry.exists?
         if !entry.main? && entry.exists?
-          flags << "dirty" if Worktrees.dirty?(entry.path, ignore: LOCAL_CONFIG_FILES)
+          flags << "dirty" if Worktrees.dirty?(entry.path, ignore: local_config_files(entry.path))
           if entry.detached
             flags << "unmerged"
           else
@@ -83,6 +104,18 @@ module Yamine
         end
         line += "  (#{flags.join(", ")})" unless flags.empty?
         line
+      end
+
+      # Every database a claim stands for, one per line under the row —
+      # five names inline would unreadable, and hiding them would
+      # re-create the "which database is this worktree even using"
+      # question the claim exists to answer.
+      def print_claim_databases(claim)
+        info = claim && claim[1]
+        names = info.is_a?(Hash) ? info["names"] : nil
+        return unless names.is_a?(Hash) && !names.empty?
+
+        names.each_value { |db| puts "      db: #{db}" }
       end
 
       # yamine worktree add <name> [--dir <path>] [--no-install]
@@ -135,13 +168,16 @@ module Yamine
 
       def copy_local_config(from_dir, to_dir)
         copied = []
-        LOCAL_CONFIG_FILES.each do |rel|
+        local_config_files(from_dir).each do |rel|
           src = File.join(from_dir, rel)
           next unless File.file?(src)
 
           dst = File.join(to_dir, rel)
           FileUtils.mkdir_p(File.dirname(dst))
           FileUtils.cp(src, dst)
+          # Decryption keys stay as private in the worktree as they
+          # were in the checkout — FileUtils.cp does not carry modes.
+          File.chmod(0o600, dst) if rel.end_with?(".key")
           copied << rel
         end
         copied
@@ -158,32 +194,53 @@ module Yamine
         puts "  bundle install did not finish — run it in #{dir} before booting" unless $?.success?
       end
 
-      # Claim the per-worktree database and create it now (with the
+      # Claim this worktree's databases and create them now (with the
       # app's schema) so server problems surface at creation time, not
-      # at first boot. Boot reuses an existing database idempotently, so
-      # this is never wasted work. SQLite and template-less apps need
-      # nothing; setup_database says so itself.
+      # at first boot. Rails apps are ASKED what they have (the probe
+      # resolves database.yml + credentials inside the app itself) and
+      # get the whole suffixed set — claim, marker file, databases,
+      # schema. Boot reuses an existing set idempotently, so this is
+      # never wasted work. SQLite and non-Rails apps fall through to
+      # the single-database path, which setup_database narrates.
       def prepare_database(ctx, dir)
         return nil unless Config.load(dir)
 
-        db_name = Database.name_for(dir, env: BootCommand.rails_env,
+        claim_key = Database.name_for(dir, env: BootCommand.rails_env,
           state_dir: ctx.store.dir)
-        Dir.chdir(dir) do
-          BootCommand.setup_database(ctx, Resolver.resolve(dir), db_name)
+        rows = Probe.rails_databases(dir)
+        server = rows && Probe.server_backed(rows)
+        if server && !server.empty?
+          BootCommand.provision_multidb(ctx, dir, claim_key, server)
+        else
+          Dir.chdir(dir) do
+            BootCommand.setup_database(ctx, Resolver.resolve(dir), claim_key)
+          end
         end
-        db_name
+        claim_key
       end
 
-      def say_ready(ctx, dir, name, db_name)
+      def say_ready(ctx, dir, name, db_key)
         puts "Worktree ready:"
         puts "  dir      #{dir}"
         puts "  branch   #{name}"
-        puts "  db       #{db_name}" if db_name
+        print_ready_databases(ctx, db_key)
         if (resolved = resolved_quietly(dir))
           Resolver.urls(resolved, port: ctx.proxy_port, tls: ctx.proxy_tls)
             .each { |u| puts "  url      #{u}" }
         end
         puts "  boot it: cd #{dir} && yamine start"
+      end
+
+      def print_ready_databases(ctx, db_key)
+        return unless db_key
+
+        names = Database.load_map(ctx.store.dir).dig(db_key, "names")
+        if names.is_a?(Hash) && !names.empty?
+          puts "  db       #{names.size} databases:"
+          names.each_value { |db| puts "             #{db}" }
+        else
+          puts "  db       #{db_key}"
+        end
       end
 
       def resolved_quietly(dir)
@@ -214,7 +271,7 @@ module Yamine
           return
         end
 
-        if Worktrees.dirty?(entry.path, ignore: LOCAL_CONFIG_FILES) && !opts[:force]
+        if Worktrees.dirty?(entry.path, ignore: local_config_files(entry.path)) && !opts[:force]
           $stderr.puts "Error: #{entry.path} has uncommitted changes."
           $stderr.puts "  Commit or stash them, or re-run with --force to discard them."
           exit 1
@@ -309,7 +366,7 @@ module Yamine
             plan << Plan.new(:prune, entry)
             next
           end
-          if Worktrees.dirty?(entry.path, ignore: LOCAL_CONFIG_FILES)
+          if Worktrees.dirty?(entry.path, ignore: local_config_files(entry.path))
             plan << Plan.new(:keep, entry.path, "uncommitted changes are never cleaned automatically")
             next
           end
@@ -328,29 +385,55 @@ module Yamine
       end
 
       # An admin entry whose directory vanished (rm -rf, a crashed
-      # agent): drop the database it claimed, forget the claim. The git
-      # entry itself is cleared by the trailing prune. A template with
-      # no server behind it (sqlite) means there is nothing to drop and
-      # no retry that could help — the claim is simply forgotten.
+      # agent): drop every database it claimed, forget the claim. The
+      # git entry itself is cleared by the trailing prune. The claim
+      # itself carries the names AND the server coordinates — an
+      # orphan's config is unreadable by definition, and the app must
+      # not have to boot (or even still bundle) for cleanup to work.
+      # A claim with no server behind it (sqlite) means there is
+      # nothing to drop and no retry that could help — the claim is
+      # simply forgotten. A LEGACY claim with no reachable template
+      # anywhere (credentials apps pre-multi-database never declared
+      # one) is also forgotten, with the database name said out loud:
+      # erroring forever would leave `clean` permanently red for a
+      # claim no future command can ever resolve.
       def drop_orphan(ctx, name, _dir)
+        info = Database.load_map(ctx.store.dir)[name]
+        pairs = Database.claim_pairs(info)
         template = orphan_template(ctx)
-        unless template
-          $stderr.puts "Error: no DATABASE_URL template found (ENV or env.clear in " \
-            "config/local.yml) — cannot drop #{name}."
-          return false
+
+        if pairs.nil?
+          unless template
+            warn "  no DATABASE_URL template found (ENV or env.clear in config/local.yml) — " \
+                 "cannot reach #{name}; claim forgotten."
+            warn "    If a database named #{name} still exists on a server, drop it manually."
+            forget_claim(ctx, name)
+            return true
+          end
+          pairs = [[name, template]]
+        else
+          pairs = pairs.map { |db, tmpl| [db, (tmpl || template)] }
         end
-        unless %i[postgres mysql].include?(Database.adapter_for(template))
+
+        first_url = pairs.first&.[](1)
+        unless %i[postgres mysql].include?(first_url && Database.adapter_for(first_url))
           puts "  #{name} has no server database (sqlite/unknown adapter) — claim forgotten"
           forget_claim(ctx, name)
           return true
         end
-        case Database.drop(name, template)
-        when :dropped then puts "  dropped #{name}"
-        when :missing then puts "  #{name} did not exist — nothing to drop"
-        when :failed
-          warn "  could not drop #{name} — is the server running? Claim kept for a retry."
-          return false
+
+        failed = false
+        pairs.each do |db, tmpl|
+          case Database.drop(db, tmpl)
+          when :dropped then puts "  dropped #{db}"
+          when :missing then puts "  #{db} did not exist — nothing to drop"
+          when :failed
+            warn "  could not drop #{db} — is the server running? Claim kept for a retry."
+            failed = true
+          end
         end
+        return false if failed
+
         forget_claim(ctx, name)
         true
       end
@@ -419,7 +502,7 @@ module Yamine
         stop_routes(ctx, dir)
 
         if claim
-          outcome = drop_database(repo, dir, claim[0])
+          outcome = drop_database(repo, dir, claim[0], claim[1])
           if outcome == :failed
             warn "  kept #{dir} — database drop failed; fix the server and re-run"
             return false
@@ -476,22 +559,35 @@ module Yamine
         end
       end
 
-      def drop_database(repo, dir, name)
-        template = drop_template_for(repo, dir)
-        adapter = template && Database.adapter_for(template)
-        unless %i[postgres mysql].include?(adapter)
+      # Drop every database a claim stands for: the whole suffixed set
+      # for a multi claim, the one key-named database for a legacy
+      # single claim. Any :failed aborts the whole teardown (kept for
+      # a retry) — a half-dropped set with a removed worktree is
+      # orphan territory, and orphans are the bug this guards.
+      def drop_database(repo, dir, name, info = nil)
+        fallback = drop_template_for(repo, dir)
+        pairs = Database.claim_pairs(info) || [[name, fallback]]
+        pairs = pairs.map { |db, tmpl| [db, (tmpl || fallback)] }
+
+        first_url = pairs.first&.[](1)
+        unless %i[postgres mysql].include?(first_url && Database.adapter_for(first_url))
           puts "  no server database to drop for #{name} " \
-            "(#{template ? "sqlite/unknown adapter" : "no DATABASE_URL template"})"
+            "(#{first_url ? "sqlite/unknown adapter" : "no DATABASE_URL template"})"
           return :missing
         end
 
-        outcome = Database.drop(name, template)
-        case outcome
-        when :dropped then puts "  dropped #{name}"
-        when :missing then puts "  #{name} did not exist — nothing to drop"
-        when :failed then puts "  could not drop #{name} — is the database server running?"
+        outcomes = pairs.map do |db, tmpl|
+          outcome = Database.drop(db, tmpl)
+          case outcome
+          when :dropped then puts "  dropped #{db}"
+          when :missing then puts "  #{db} did not exist — nothing to drop"
+          when :failed then puts "  could not drop #{db} — is the database server running?"
+          end
+          outcome
         end
-        outcome
+        return :failed if outcomes.include?(:failed)
+
+        outcomes.include?(:dropped) ? :dropped : :missing
       end
 
       # Reach the database server from the worktree's own config (read

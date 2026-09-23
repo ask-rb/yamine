@@ -13,7 +13,7 @@ class AgentIdentityTest < Minitest::Test
   def teardown
     ENV["YAMINE_AGENT"] = @orig_agent if @orig_agent
     ENV.delete("YAMINE_AGENT") unless @orig_agent
-    ENV["YAMINE_MAX_ROUTES"] = @orig_max if @orig_max
+    if @orig_max then ENV["YAMINE_MAX_ROUTES"] = @orig_max else ENV.delete("YAMINE_MAX_ROUTES") end
     FileUtils.remove_entry(@dir)
   end
 
@@ -105,13 +105,14 @@ class AgentQuotaTest < Minitest::Test
     @dir = Dir.mktmpdir
     @orig_agent = ENV["YAMINE_AGENT"]
     @orig_max = ENV["YAMINE_MAX_ROUTES"]
+    ENV.delete("YAMINE_MAX_ROUTES")
     @store = Yamine::RouteStore.new(@dir)
   end
 
   def teardown
     ENV["YAMINE_AGENT"] = @orig_agent if @orig_agent
     ENV.delete("YAMINE_AGENT") unless @orig_agent
-    ENV["YAMINE_MAX_ROUTES"] = @orig_max if @orig_max
+    if @orig_max then ENV["YAMINE_MAX_ROUTES"] = @orig_max else ENV.delete("YAMINE_MAX_ROUTES") end
     FileUtils.remove_entry(@dir)
   end
 

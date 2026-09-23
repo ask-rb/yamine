@@ -100,11 +100,11 @@ module Yamine
     # yamine's own keys (PORT, YAMINE_URL, DATABASE_URL, the TLS vars)
     # win over it, because those describe the boot rather than the app.
     def boot_run(name:, hostname:, url:, dir:, command:, port: nil, force: false,
-      rails_dev_host: nil, register: true, database_url: nil, spec: nil,
-      extra_env: nil, subdomains: false)
+      rails_dev_host: nil, register: true, database_url: nil, database_env: nil,
+      spec: nil, extra_env: nil, subdomains: false)
       port ||= Ports.find_free
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
-        database_url: database_url, extra_env: extra_env)
+        database_url: database_url, database_env: database_env, extra_env: extra_env)
       path = log_path(dir, name)
       pid = with_clean_env { spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
       Process.detach(pid)
@@ -131,9 +131,9 @@ module Yamine
     # Returns the placeholder App (target known before bind). Fate of
     # the backend is decided by wait, not by spawn.
     def spawn_http(name:, hostname:, url:, dir:, command:, port:, rails_dev_host: nil,
-      database_url: nil, force: false, extra_env: nil)
+      database_url: nil, database_env: nil, force: false, extra_env: nil)
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
-        database_url: database_url, extra_env: extra_env)
+        database_url: database_url, database_env: database_env, extra_env: extra_env)
       path = log_path(dir, name)
       pid = with_clean_env { spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
       Process.detach(pid)
@@ -158,7 +158,8 @@ module Yamine
       false
     end
 
-    def child_env(dir, url:, port:, rails_dev_host: nil, database_url: nil, extra_env: nil)
+    def child_env(dir, url:, port:, rails_dev_host: nil, database_url: nil,
+      database_env: nil, extra_env: nil)
       # The config's own variables first, so everything below overrides
       # them: PORT, YAMINE_URL, DATABASE_URL, and the TLS paths describe
       # *this boot* and must not be lost to a stray key in local.yml.
@@ -190,10 +191,17 @@ module Yamine
       # proxied hostname so Rails apps boot behind yamine with zero
       # config — this replaces the yamine-rails hosts patch.
       env["RAILS_DEVELOPMENT_HOSTS"] = rails_dev_host if rails_dev_host
-      # Per-worktree database: every process in this worktree shares one
-      # isolated database. Frameworks that honor DATABASE_URL (Rails,
-      # Django, most Node) get isolation for free; others ignore it.
-      env["DATABASE_URL"] = database_url if database_url
+      # Per-worktree databases: the whole isolated set this checkout
+      # claims — DATABASE_URL for primary plus NAME_DATABASE_URL per
+      # extra config (Rails' own convention), so a multi-database app
+      # gets every database redirected, not just the first. Frameworks
+      # that honor DATABASE_URL (Rails, Django, most Node) get
+      # isolation for free; others ignore it.
+      if database_env
+        database_env.each { |k, v| env[k.to_s] = v.to_s if v }
+      elsif database_url
+        env["DATABASE_URL"] = database_url
+      end
       env
     end
 
