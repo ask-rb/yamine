@@ -21,16 +21,20 @@ class CLITest < Minitest::Test
 
   def run_cli(*args)
     out = StringIO.new
-    orig = $stdout
+    err = StringIO.new
+    orig_out = $stdout
+    orig_err = $stderr
     $stdout = out
+    $stderr = err
     code = begin
       Yamine::CLI.run(args)
     rescue SystemExit => e
       e.status
     end
-    [code, out.string]
+    [code, out.string, err.string]
   ensure
-    $stdout = orig
+    $stdout = orig_out
+    $stderr = orig_err
   end
 
   def test_help
@@ -130,5 +134,114 @@ class CLITest < Minitest::Test
   def test_unknown_flag_errors
     code, _out = run_cli("run", "--bogus")
     assert_equal 1, code
+  end
+
+  def test_worktree_info_shows_branch_and_path
+    Dir.mktmpdir do |tmp|
+      repo = File.join(tmp, "app")
+      FileUtils.mkdir_p(repo)
+      system("git", "-C", repo, "init", "-q", "-b", "master",
+        out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "config", "user.email", "t@t.t",
+        out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "config", "user.name", "t",
+        out: File::NULL, err: File::NULL)
+      File.write(File.join(repo, "README.md"), "# app\n")
+      system("git", "-C", repo, "add", "-A", out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "commit", "-qm", "init",
+        out: File::NULL, err: File::NULL)
+      wt_path = File.join(tmp, "app-wip")
+      system("git", "-C", repo, "worktree", "add", "-q", "-b", "wip", wt_path,
+        out: File::NULL, err: File::NULL)
+
+      Dir.chdir(repo) do
+        code, out, = run_cli("worktree", "info", "wip")
+        assert_equal 0, code
+        assert_includes out, "branch     wip"
+        assert_includes out, "path"
+        assert_includes out, "HEAD"
+        assert_includes out, "dirty      no"
+        assert_includes out, "merged"
+      end
+    end
+  end
+
+  def test_worktree_info_json_output
+    Dir.mktmpdir do |tmp|
+      repo = File.join(tmp, "app")
+      FileUtils.mkdir_p(repo)
+      system("git", "-C", repo, "init", "-q", "-b", "master",
+        out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "config", "user.email", "t@t.t",
+        out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "config", "user.name", "t",
+        out: File::NULL, err: File::NULL)
+      File.write(File.join(repo, "README.md"), "# app\n")
+      system("git", "-C", repo, "add", "-A", out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "commit", "-qm", "init",
+        out: File::NULL, err: File::NULL)
+      wt_path = File.join(tmp, "app-wip")
+      system("git", "-C", repo, "worktree", "add", "-q", "-b", "wip", wt_path,
+        out: File::NULL, err: File::NULL)
+
+      Dir.chdir(repo) do
+        code, out, = run_cli("worktree", "info", "wip", "--json")
+        assert_equal 0, code
+        require "json"
+        parsed = JSON.parse(out)
+        assert_equal "wip", parsed["branch"]
+        assert_equal false, parsed["dirty"]
+        assert parsed.key?("merged")
+        assert parsed.key?("head")
+        assert parsed.key?("author")
+        assert parsed.key?("date")
+      end
+    end
+  end
+
+  def test_worktree_info_not_found_errors
+    Dir.mktmpdir do |tmp|
+      repo = File.join(tmp, "app")
+      FileUtils.mkdir_p(repo)
+      system("git", "-C", repo, "init", "-q", "-b", "master",
+        out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "config", "user.email", "t@t.t",
+        out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "config", "user.name", "t",
+        out: File::NULL, err: File::NULL)
+      File.write(File.join(repo, "README.md"), "# app\n")
+      system("git", "-C", repo, "add", "-A", out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "commit", "-qm", "init",
+        out: File::NULL, err: File::NULL)
+
+      Dir.chdir(repo) do
+        code, _out, err = run_cli("worktree", "info", "nonexistent")
+        assert_equal 1, code
+        assert_includes err, "no worktree named"
+      end
+    end
+  end
+
+  def test_worktree_info_missing_name_errors
+    Dir.mktmpdir do |tmp|
+      repo = File.join(tmp, "app")
+      FileUtils.mkdir_p(repo)
+      system("git", "-C", repo, "init", "-q", "-b", "master",
+        out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "config", "user.email", "t@t.t",
+        out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "config", "user.name", "t",
+        out: File::NULL, err: File::NULL)
+      File.write(File.join(repo, "README.md"), "# app\n")
+      system("git", "-C", repo, "add", "-A", out: File::NULL, err: File::NULL)
+      system("git", "-C", repo, "commit", "-qm", "init",
+        out: File::NULL, err: File::NULL)
+
+      Dir.chdir(repo) do
+        code, _out, err = run_cli("worktree", "info")
+        assert_equal 1, code
+        assert_includes err, "Usage:"
+      end
+    end
   end
 end

@@ -52,6 +52,36 @@ module Yamine
       entries
     end
 
+    # Detailed information about a single worktree. Returns a Hash with
+    # keys: :branch, :path, :head, :author, :date, :dirty, :merged.
+    def info(dir, entry, default_branch: nil)
+      repo = dir
+      branch_name = entry.main? ? "main" : (entry.branch || "(detached)")
+
+      head, subject, author_name, author_email, date = commit_info(entry.path)
+
+      dirty = entry.exists? &&
+        !entry.main? &&
+        dirty?(entry.path, ignore: [])
+
+      merged = if entry.detached || entry.main?
+                 nil
+               else
+                 db = default_branch || default_branch_for(repo)
+                 merged?(repo, entry.branch, into: db)
+               end
+
+      {
+        branch: branch_name,
+        path: File.expand_path(entry.path),
+        head: head,
+        author: author_name && author_email ? "#{author_name} <#{author_email}>" : nil,
+        date: date,
+        dirty: dirty,
+        merged: merged
+      }
+    end
+
     # The worktree whose branch or directory basename is `name`.
     def find(dir, name)
       list(dir).find do |entry|
@@ -142,6 +172,31 @@ module Yamine
       Open3.capture2("git", *args, chdir: dir, err: File::NULL)
     rescue SystemCallError, ArgumentError
       ["", nil]
+    end
+
+    # Return [short_sha, subject, author_name, author_email, iso_date]
+    # for the HEAD commit of `path`. Any field may be nil when git fails.
+    def commit_info(path)
+      out, status = git(path,
+        "log", "-1", "--format=%h\t%s\t%an\t%ae\t%aI")
+      return [nil, nil, nil, nil, nil] unless status&.success?
+
+      parts = out.strip.split("\t", 5)
+      [parts[0], parts[1], parts[2], parts[3], parts[4]]
+    rescue SystemCallError, ArgumentError
+      [nil, nil, nil, nil, nil]
+    end
+
+    # Resolve the default branch for merging comparisons.
+    def default_branch_for(repo)
+      Variant::DEFAULT_BRANCHES.each do |candidate|
+        return candidate if branch_exists?(repo, candidate)
+      end
+
+      out, status = git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+      return out.strip.sub(%r{\Arefs/remotes/origin/}, "") if status&.success? && !out.strip.empty?
+
+      "master"
     end
   end
 end

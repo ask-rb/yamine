@@ -161,6 +161,64 @@ class WorktreesGitTest < Minitest::Test
     assert_empty Yamine::Worktrees.list(@dir)
   end
 
+  def test_info_returns_expected_keys_for_a_linked_worktree
+    Yamine::Worktrees.add(@repo, "wip", File.join(@dir, "app-wip"))
+    entry = Yamine::Worktrees.find(@repo, "wip")
+
+    result = Yamine::Worktrees.info(@repo, entry, default_branch: "master")
+
+    assert_equal "wip", result[:branch]
+    assert_equal File.expand_path(entry.path), result[:path]
+    assert_match(/\A[0-9a-f]+\z/, result[:head])
+    assert_includes result[:author], "@"
+    assert result[:date].start_with?("20") # ISO 8601 year prefix
+    assert_equal false, result[:dirty]
+    assert_equal true, result[:merged] # wip points at same commit as master
+  end
+
+  def test_info_shows_dirty_when_worktree_has_uncommitted_changes
+    Yamine::Worktrees.add(@repo, "wip", File.join(@dir, "app-wip"))
+    wt = File.join(@dir, "app-wip")
+    File.write(File.join(wt, "extra.txt"), "changes\n")
+    entry = Yamine::Worktrees.find(@repo, "wip")
+
+    result = Yamine::Worktrees.info(@repo, entry, default_branch: "master")
+
+    assert_equal true, result[:dirty]
+  end
+
+  def test_info_main_worktree_has_branch_main_and_nil_merged
+    entry = Yamine::Worktrees.list(@repo).first
+
+    result = Yamine::Worktrees.info(@repo, entry, default_branch: "master")
+
+    assert_equal "main", result[:branch]
+    assert_nil result[:merged]
+    assert_equal false, result[:dirty]
+  end
+
+  def test_info_detached_worktree_has_branch_label_and_nil_merged
+    # Create a detached worktree by checking out a specific commit
+    Yamine::Worktrees.add(@repo, "wip", File.join(@dir, "app-wip"))
+    wt = File.join(@dir, "app-wip")
+    File.write(File.join(wt, "extra.txt"), "work\n")
+    system("git", "-C", wt, "add", "-A", out: File::NULL, err: File::NULL)
+    system("git", "-C", wt, "commit", "-qm", "work", out: File::NULL, err: File::NULL)
+
+    # Detach HEAD in the worktree
+    head_sha = `git -C #{wt} rev-parse HEAD`.strip
+    system("git", "-C", wt, "checkout", "--detach", head_sha, out: File::NULL, err: File::NULL)
+
+    # Re-parse to pick up the detached state
+    entries = Yamine::Worktrees.list(@repo)
+    entry = entries.find { |e| e.branch.nil? && e.detached }
+
+    result = Yamine::Worktrees.info(@repo, entry, default_branch: "master")
+
+    assert_equal "(detached)", result[:branch]
+    assert_nil result[:merged]
+  end
+
   private
 
   def git_branch_exists?(name)

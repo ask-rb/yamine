@@ -52,12 +52,13 @@ module Yamine
         sub = args.first
         case sub
         when "list", nil then list(ctx, args[1..] || [])
+        when "info" then info(ctx, args[1..] || [])
         when "add" then add(ctx, args[1..] || [])
         when "remove" then remove(ctx, args[1..] || [])
         when "clean" then clean(ctx, args[1..] || [])
         else
           raise Error,
-            "Usage: yamine worktree list | add <name> [--dir <path>] [--no-install] | " \
+            "Usage: yamine worktree list | info <name> [--json] | add <name> [--dir <path>] [--no-install] | " \
             "remove <name> [--force] | clean [--all] [--dry-run]"
         end
       end
@@ -108,6 +109,59 @@ module Yamine
         end
         line += "  (#{flags.join(", ")})" unless flags.empty?
         line
+      end
+
+      # yamine worktree info <name> [--json]
+      #
+      # Detailed view of a single worktree: branch, HEAD, author, date,
+      # dirty/merged status, and any database claims.
+      def info(ctx, args)
+        opts, rest = take_flags(args, value_flags: [], flags: %w[--json])
+        name = rest.first
+        raise Error, "Usage: yamine worktree info <name> [--json]" unless name
+
+        repo = repo_top || abort_not_in_repo
+        entry = Worktrees.find(repo, name)
+        unless entry
+          raise Error, "no worktree named #{name.inspect} here — `yamine worktree list` shows what exists"
+        end
+
+        map = Database.load_map(ctx.store.dir)
+        claim = claim_for(map, entry.path)
+        default_branch = Worktrees.default_branch(repo)
+
+        result = Worktrees.info(repo, entry, default_branch: default_branch)
+        result[:databases] = database_names(claim)
+
+        if opts[:json]
+          require "json"
+          puts JSON.pretty_generate(result)
+        else
+          print_info(result)
+        end
+      end
+
+      def database_names(claim)
+        return [] unless claim
+
+        info = claim[1]
+        names = info.is_a?(Hash) ? info["names"] : nil
+        return [claim[0]] unless names.is_a?(Hash) && !names.empty?
+
+        names.values
+      end
+
+      def print_info(result)
+        puts "  branch     #{result[:branch]}"
+        puts "  path       #{result[:path]}"
+        puts "  HEAD       #{result[:head]}"
+        puts "  author     #{result[:author]}" if result[:author]
+        puts "  date       #{result[:date]}" if result[:date]
+        puts "  dirty      #{result[:dirty] ? "yes" : "no"}"
+        puts "  merged     #{result[:merged].nil? ? "n/a" : (result[:merged] ? "yes" : "no")}"
+        if result[:databases] && !result[:databases].empty?
+          result[:databases].each { |db| puts "  database   #{db}" }
+        end
       end
 
       # Every database a claim stands for, one per line under the row —
