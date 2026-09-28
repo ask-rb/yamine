@@ -34,6 +34,7 @@ module Yamine
       checks << check_dns(store)
       checks << check_ca
       checks << check_ca_bundle
+      checks << check_serving_ca(port, tls: tls)
       checks
     end
 
@@ -222,6 +223,38 @@ module Yamine
       Check.new(name: "bundle", ok: true, message: "#{count} certificates (system roots + yamine CA)")
     rescue StandardError => e
       Check.new(name: "bundle", ok: false, message: "could not build #{Certs.bundle_path(dir)}: #{e.message}")
+    end
+
+    # The certificate the proxy ACTUALLY serves, verified against the CA
+    # now on disk. The CA can be regenerated under a live proxy
+    # (`yamine clean`/`trust`/`setup` rewrite the pair); without this
+    # check doctor reported "[ok] proxy: listening" and "[ok] ca: CA
+    # trusted" while every browser got ERR_CERT_AUTHORITY_INVALID,
+    # because nothing compared the served leaf to the current CA.
+    def check_serving_ca(port, tls:)
+      return Check.new(name: "serving ca", ok: true, message: "TLS off — no serving certificate to check") unless tls
+      return Check.new(name: "serving ca", ok: true, message: "no proxy serving — skipped") if port.nil?
+
+      dir = Certs.state_dir
+      ca_path = Certs.ca_paths(dir)[:cert]
+      return Check.new(name: "serving ca", ok: true, message: "no CA on disk — skipped") unless File.file?(ca_path)
+
+      leaf = Trust.proxy_peer_cert(port)
+      return Check.new(name: "serving ca", ok: true, warn: true,
+        message: "could not read the proxy's serving certificate — skipped") if leaf.nil?
+
+      ca = OpenSSL::X509::Certificate.new(File.read(ca_path))
+      if Trust.signed_by?(leaf, ca)
+        Check.new(name: "serving ca", ok: true, message: "serving certificate matches the CA on disk")
+      else
+        Check.new(name: "serving ca", ok: false,
+          message: "proxy serves a certificate signed by a superseded CA — " \
+            "restart it: sudo launchctl kickstart -k system/dev.yamine " \
+            "(or sudo yamine service install to re-register the service after a gem upgrade)")
+      end
+    rescue StandardError => e
+      Check.new(name: "serving ca", ok: true, warn: true,
+        message: "could not check the serving certificate (#{e.message}) — skipped")
     end
 
     # How many trusted certificates carry one of our CA names without

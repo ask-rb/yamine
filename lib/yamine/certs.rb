@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require "fileutils"
 require "openssl"
 
@@ -170,23 +171,32 @@ module Yamine
     end
 
     # Build an SSLContext whose SNI callback serves the right cert per host.
+    #
+    # The CA pair on disk can be regenerated under a live proxy (`yamine
+    # clean`/`trust`/`setup` rewrite it). A proxy that keeps signing with
+    # its boot-time CA then mints leaves no browser trusts
+    # (ERR_CERT_AUTHORITY_INVALID against the new CA), so the SNI
+    # callback — which already runs per handshake — reloads the pair
+    # when it changes and drops every leaf minted from the old one.
     def server_context(dir = state_dir)
-      ca_cert, ca_key = load_ca(dir)
+      watcher = CaWatcher.new(dir)
       cache = CertCache.new(CACHE_SIZE)
+      watcher.on_reload = -> { cache.clear }
       ctx = OpenSSL::SSL::SSLContext.new
-      ctx.cert = ca_cert
-      ctx.key = ca_key
+      ctx.cert, ctx.key = watcher.current
       # ruby-openssl versions differ in how the callback receives its
       # arguments: [[socket, name]] (one array arg), (socket, name), or
       # (name). Flatten defensively — a raise inside the callback
       # surfaces as an unrecognized-name handshake alert.
       ctx.servername_cb = lambda do |*args|
         host = Array(args).flatten.last.to_s.downcase
-        entry = cache.fetch(host) do
-          cert, key = mint_host(host, ca_cert, ca_key)
-          [cert, key]
+        watcher.with_current do |ca_cert, ca_key|
+          entry = cache.fetch(host) do
+            cert, key = mint_host(host, ca_cert, ca_key)
+            [cert, key]
+          end
+          entry ? OpenSSL::SSL::SSLContext.new.tap { |c| c.cert, c.key = entry } : nil
         end
-        entry ? OpenSSL::SSL::SSLContext.new.tap { |c| c.cert, c.key = entry } : nil
       end
       ctx
     end
@@ -251,6 +261,96 @@ module Yamine
 
       def size
         @mutex.synchronize { @store.size }
+      end
+
+      # Every entry is signed by one CA generation; a reload must not
+      # leave old-CA leaves behind to be served after the swap.
+      def clear
+        @mutex.synchronize do
+          @store.clear
+          @order.clear
+        end
+      end
+    end
+
+    # The CA pair a live server_context signs with, reloaded when the
+    # files on disk change. The hot path is two stat calls per
+    # handshake; the pair is only re-read (and the leaf cache only
+    # dropped) when a stat snapshot moves AND the digest differs, so a
+    # touch without content change costs nothing. One mutex around
+    # check+reload+mint keeps a swap from racing a handshake into a
+    # mixed pair or a stale cache hit. A failed reload keeps serving
+    # the previous CA — a raise inside the SNI callback would abort
+    # the handshake outright.
+    class CaWatcher
+      def initialize(dir)
+        @dir = dir
+        @mutex = Mutex.new
+        @cert, @key = Certs.load_ca(dir)
+        @stat = stat_snapshot
+        @digest = pair_digest
+        @on_reload = nil
+      end
+
+      # Called (once per swap, under the lock) after a reload. The
+      # server_context sets this to drop its leaf cache.
+      attr_writer :on_reload
+
+      def current
+        [@cert, @key]
+      end
+
+      def with_current
+        @mutex.synchronize do
+          reload_if_changed!
+          yield @cert, @key
+        end
+      end
+
+      private
+
+      def paths
+        Certs.ca_paths(@dir)
+      end
+
+      def stat_snapshot
+        [paths[:cert], paths[:key]].map do |path|
+          stat = File.stat(path)
+          [stat.mtime, stat.size]
+        end
+      rescue SystemCallError
+        nil
+      end
+
+      def pair_digest
+        Digest::SHA256.hexdigest(File.read(paths[:cert]) + File.read(paths[:key]))
+      rescue SystemCallError, OpenSSL::OpenSSLError
+        nil
+      end
+
+      def reload_if_changed!
+        snapshot = stat_snapshot
+        return if !snapshot.nil? && snapshot == @stat
+
+        digest = pair_digest
+        if !digest.nil? && digest == @digest
+          # Touched but unchanged: adopt the snapshot so the hot path
+          # goes back to two stats instead of a digest per handshake.
+          @stat = snapshot
+          return
+        end
+
+        # The serving SSLContext is frozen once the server accepts, so
+        # the default certificate cannot be swapped mid-flight — and it
+        # does not need to be: every real client sends SNI, and the
+        # per-host context this callback returns carries the new CA.
+        cert, key = Certs.load_ca(@dir)
+        @cert, @key = cert, key
+        @stat = stat_snapshot
+        @digest = digest || pair_digest
+        @on_reload&.call
+      rescue CertError, OpenSSL::OpenSSLError, SystemCallError
+        nil
       end
     end
   end
