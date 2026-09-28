@@ -218,7 +218,8 @@ module Yamine
         when "install" then exit(service_install(ctx, args) ? 0 : 1)
         when "uninstall" then exit(service_uninstall(ctx) ? 0 : 1)
         when "status" then service_status(ctx)
-        else raise Error, "Usage: yamine service [install|uninstall|status]"
+        when "stage" then exit(service_stage(ctx, args) ? 0 : 1)
+        else raise Error, "Usage: yamine service [install|uninstall|status|stage]"
         end
       end
 
@@ -344,6 +345,23 @@ module Yamine
       # runs a user-writable Ruby (no root-owned Ruby >= 3.2 exists on
       # this machine), so the payload being root-owned is necessary but
       # not sufficient. Never papered over.
+      # Root half of the sudo-daemon staging step (`service stage
+      # --internal`): create the root-owned payload from the running gem
+      # source. Invoked only under an already human-authorized sudo —
+      # the --no-service fallback's prompt, or an explicit admin sudo —
+      # which is what authorizes running the gem source once to mint the
+      # payload the daemon then runs. Never granted, never passwordless.
+      def service_stage(ctx, args)
+        unless ProxyControl.root? && args.include?("--internal")
+          raise Error, "`service stage --internal` is the root half of the sudo-daemon staging step — run `yamine setup --no-service` or `sudo yamine service install`"
+        end
+        store = privileged_store(ctx)
+        version = PrivilegedPayload.stage!(state_dir: store.dir)
+        puts "Staged privileged payload v#{version} (#{PrivilegedPayload.root_dir})."
+        print_interpreter_note
+        true
+      end
+
       def print_interpreter_note
         ruby = PrivilegedPayload.ruby_info
         return unless ruby[:writable]
@@ -426,12 +444,18 @@ module Yamine
         File.join(user_home_for_service, ".yamine")
       end
 
-      # The store a root half acts on. As root, ctx.store would resolve
-      # through root's HOME — but the invoking user's routes live under
-      # their own dir, so derive it instead. Unprivileged runs keep
-      # ctx.store untouched.
+      # The store a root half acts on. As root without an explicit dir,
+      # ctx.store would resolve through root's HOME — but the invoking
+      # user's routes live under their own dir, so derive it from
+      # SUDO_USER instead. An explicit dir survives only when a human
+      # passed it through sudo deliberately (env_reset strips it
+      # otherwise); honor that so custom state dirs keep working.
+      # Unprivileged runs keep ctx.store untouched.
       def privileged_store(ctx)
         return ctx.store unless ProxyControl.root?
+
+        env_dir = ENV["YAMINE_STATE_DIR"]
+        return ctx.store if env_dir && !env_dir.empty?
 
         RouteStore.new(invoking_state_dir, on_warning: ->(m) { warn m })
       end
@@ -734,6 +758,8 @@ module Yamine
               (no separate GUI authorization popup).
               --no-service: trust the CA at user level, then run a sudo
               daemon instead (no boot persistence; ephemeral machines).
+              The daemon runs the staged root-owned payload, staging it
+              first under the same sudo when missing.
 
             Both finish by syncing /etc/hosts and verifying with doctor.
           HELP

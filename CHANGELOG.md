@@ -64,6 +64,11 @@
   and spaces are backslash-escaped when the rules are printed. Pinned
   by a parity test that parses the printed specs and asserts equality
   with the captured elevated argv.
+- **The `--no-service` sudo daemon no longer executes the gem
+  directory as root.** A privileged `proxy start` spawns the staged
+  root-owned payload, staging it first under the same
+  human-authorized sudo (`service stage --internal`, never granted)
+  when missing. The unprivileged spawn path is unchanged.
 
 ### Open caveat (not closed, stated plainly)
 - **The interpreter is still user-writable.** No root-owned Ruby ≥ 3.2

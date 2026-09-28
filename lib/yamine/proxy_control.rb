@@ -257,12 +257,15 @@ module Yamine
       store.ensure_dir
       log_path = File.join(store.dir, LOG_NAME)
       Log.rotate(log_path)
-      args = [RbConfig.ruby, bin_path,
-        "proxy", "start", "--foreground", "--port", port.to_s]
-      args << "--no-tls" unless tls
-      Array(tlds).each { |t| args.concat(["--tld", t]) }
-      state_arg = "YAMINE_STATE_DIR=#{store.dir}"
-      cmd = sudo ? ["sudo", "env", state_arg, *args] : [*args]
+      if sudo
+        # A privileged spawn never executes the gem directory as root:
+        # make sure the staged payload exists first (staging under this
+        # same human-authorized sudo when missing), then spawn the
+        # staged copy. The `env` prefix stays: no grant rule covers this
+        # path, and the long-lived daemon needs the exact state dir.
+        ensure_staged_payload!(store)
+      end
+      cmd = daemon_cmd(store: store, port: port, tls: tls, sudo: sudo, tlds: tlds)
       pid = spawn({ "YAMINE_STATE_DIR" => store.dir }, *cmd,
         out: log_path, err: [:child, :out])
       Process.detach(pid)
@@ -295,6 +298,42 @@ module Yamine
       end
       write_proxy_state(store, pid: pid, port: port, tls: tls)
       pid
+    end
+
+    # The exact argv a daemon spawn executes, extracted so the
+    # privileged shape is pinnable without spawning processes. The
+    # payload is the root-owned staged copy when sudo is involved —
+    # never the user-writable gem directory — and the gem path when it
+    # is not.
+    def daemon_cmd(store:, port:, tls:, sudo:, tlds: nil)
+      payload = sudo ? PrivilegedPayload.bin_path : bin_path
+      args = [RbConfig.ruby, payload,
+        "proxy", "start", "--foreground", "--port", port.to_s]
+      args << "--no-tls" unless tls
+      Array(tlds).each { |t| args.concat(["--tld", t]) }
+      state_arg = "YAMINE_STATE_DIR=#{store.dir}"
+      sudo ? ["sudo", "env", state_arg, *args] : [*args]
+    end
+
+    # Guarantee the staged payload before a privileged spawn. Runs the
+    # gem source once under the same human-authorized sudo that is
+    # about to launch the daemon (plain sudo, may prompt — never
+    # granted, never passwordless), so the daemon itself runs only the
+    # staged copy.
+    def ensure_staged_payload!(store)
+      return true if PrivilegedPayload.staged?
+
+      puts "Staging the privileged payload (sudo required)..."
+      stage_cmd = ["sudo", "env", "YAMINE_STATE_DIR=#{store.dir}",
+        RbConfig.ruby, bin_path, "service", "stage", "--internal"]
+      ok = Command.run(*stage_cmd)
+      unless ok && PrivilegedPayload.staged?
+        raise ProxyNotRunningError,
+          "Could not stage the privileged payload as root. " \
+          "Run once in a terminal: sudo yamine service install " \
+          "(or: yamine setup) — then re-run."
+      end
+      true
     end
 
     def log_tail(path, lines: 15)

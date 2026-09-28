@@ -164,14 +164,20 @@ class InvokingStateDirTest < Minitest::Test
   end
 
   def test_root_half_derives_the_invoking_users_state_dir
+    # env_reset strips YAMINE_STATE_DIR under real sudo (including the
+    # passwordless grant path, which cannot pass env); simulate that so
+    # the derivation (not the passthrough) is what is tested.
+    ENV.delete("YAMINE_STATE_DIR")
     me = ENV.fetch("USER", Etc.getlogin)
     ENV["SUDO_USER"] = me
+    # Simulate env_reset: HOME is root's in the root half.
+    Yamine::Certs.stubs(:home).returns("/var/root")
     Yamine::ProxyControl.stubs(:root?).returns(true)
 
     store = Yamine::CLI::SystemCommand.privileged_store(@ctx)
 
     assert_equal File.join(Etc.getpwnam(me).dir, ".yamine"), store.dir
-    refute_equal @ctx.store.dir, store.dir,
+    refute_equal File.join("/var/root", ".yamine"), store.dir,
       "the root half must not resolve through root's HOME"
   end
 
@@ -183,11 +189,22 @@ class InvokingStateDirTest < Minitest::Test
   end
 
   def test_root_without_sudo_user_falls_back_like_before
+    # env_reset strips YAMINE_STATE_DIR under real sudo; simulate that
+    # so the derivation (not the passthrough) is what is tested.
+    ENV.delete("YAMINE_STATE_DIR")
     ENV.delete("SUDO_USER")
     Yamine::ProxyControl.stubs(:root?).returns(true)
 
     store = Yamine::CLI::SystemCommand.privileged_store(@ctx)
 
     assert_equal File.join(Yamine::Certs.home, ".yamine"), store.dir
+  end
+
+  def test_root_honors_an_explicitly_passed_state_dir
+    # A human passing the dir through sudo deliberately (the
+    # sudo-daemon staging step does this for custom state dirs).
+    Yamine::ProxyControl.stubs(:root?).returns(true)
+
+    assert_same @ctx.store, Yamine::CLI::SystemCommand.privileged_store(@ctx)
   end
 end
