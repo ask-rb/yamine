@@ -23,6 +23,20 @@ module Yamine
     # Bounded concurrency: beyond this many simultaneous connections the
     # proxy answers 503 instead of spawning threads without limit.
     MAX_CONNECTIONS = Integer(ENV.fetch("YAMINE_MAX_CONNECTIONS", "200"))
+    # Idle bound: waiting for the NEXT byte on any client or backend
+    # socket gives up after this many seconds. The clock resets on every
+    # byte transferred, so it caps silence — never total duration. A
+    # slow trickle (SSE/NDJSON chat stream, big download) runs as long as
+    # bytes keep moving; a peer that goes quiet is dropped instead of
+    # pinning a thread. Without this, stale keep-alive sockets and
+    # stalled peers accumulate until the proxy stops answering.
+    # Named YAMINE_PROXY_IDLE_TIMEOUT (not YAMINE_IDLE_TIMEOUT — that one
+    # is the Supervisor's app-idle kill, a different clock entirely).
+    IDLE_TIMEOUT = Float(ENV.fetch("YAMINE_PROXY_IDLE_TIMEOUT", "60"))
+    # Raised when a peer is silent past the idle bound. An IOError so the
+    # existing rescue-and-close paths treat it like any dead peer.
+    IdleTimeout = Class.new(IOError)
+    CHUNK_BYTES = 16_384
     # Route cache: routes.json is the source of truth, but re-reading
     # and re-parsing it on every request is wasteful under HMR polling.
     # Keyed on file mtime, so a freshly registered route is visible on
@@ -33,7 +47,7 @@ module Yamine
     LoopDetected = Struct.new(:host, :hops)
 
     def initialize(store:, port: 443, tls: true, state_dir: nil, on_error: nil,
-      supervisor: nil, max_connections: MAX_CONNECTIONS, tlds: nil)
+      supervisor: nil, max_connections: MAX_CONNECTIONS, idle_timeout: IDLE_TIMEOUT, tlds: nil)
       @store = store
       @port = port
       @tls = tls
@@ -41,6 +55,7 @@ module Yamine
       @on_error = on_error || ->(msg) { warn msg }
       @supervisor = supervisor
       @max_connections = max_connections
+      @idle_timeout = idle_timeout
       @tlds = Array(tlds).flatten.compact.map(&:downcase)
       @tlds = [Hostname::DEFAULT_TLD] if @tlds.empty?
       @inflight = 0
@@ -92,7 +107,17 @@ module Yamine
                 end
               end
             rescue OpenSSL::SSL::SSLError, IOError, SystemCallError
-              break unless @running
+              # A per-connection accept failure (bad TLS handshake,
+              # reset peer) is one dropped connection, not a reason to
+              # stop listening. Only shutdown breaks the loop.
+              next if @running
+              break
+            rescue StandardError => e
+              # An unexpected accept error must not silently kill the
+              # acceptor either: log it and keep serving while running.
+              @on_error.call("accept error: #{e.class}: #{e.message}")
+              next if @running
+              break
             end
           end
         end
@@ -180,17 +205,29 @@ module Yamine
       [TCPServer.new("127.0.0.1", @port), TCPServer.new("::1", @port)].map do |server|
         next server unless @tls
 
-        OpenSSL::SSL::SSLServer.new(server, Certs.server_context(@state_dir))
+        with_deferred_handshake(OpenSSL::SSL::SSLServer.new(server, Certs.server_context(@state_dir)))
       end
     rescue SystemCallError
       server = TCPServer.new("127.0.0.1", @port)
-      @tls ? [OpenSSL::SSL::SSLServer.new(server, Certs.server_context(@state_dir))] : [server]
+      @tls ? [with_deferred_handshake(OpenSSL::SSL::SSLServer.new(server, Certs.server_context(@state_dir)))] : [server]
+    end
+
+    # The TLS handshake reads from the peer, so doing it inside
+    # SSLServer#accept would let a connect-and-send-nothing client pin an
+    # acceptor thread forever (and with both acceptors pinned the proxy
+    # stops answering). Defer it: accept returns after the TCP handshake
+    # and the per-connection thread finishes TLS under the idle bound in
+    # #handle. SNI/cert behavior is unchanged — only the timing moves.
+    def with_deferred_handshake(ssl_server)
+      ssl_server.start_immediately = false
+      ssl_server
     end
 
     # One connection = many requests (keep-alive). Each request head is
     # re-parsed and rewritten; bodies are framed by Content-Length;
     # responses with Content-Length allow the loop to continue.
     def handle(sock)
+      tls_handshake(sock)
       buf = +""
       loop do
         head, buf = read_head(sock, buf)
@@ -256,13 +293,13 @@ module Yamine
     # the response. Returns :keep_alive when both sides want to reuse
     # the connection and the response length was known.
     def pipe_request(sock, backend, method, target, headers, buf)
-      backend.write(rebuild_head(method, target, headers))
+      write_all(backend, rebuild_head(method, target, headers))
 
       body_len = request_body_length(headers)
       if body_len == :chunked
         # Unclassifiable request body: stream to EOF, close after.
-        backend.write(buf) unless buf.empty?
-        IO.copy_stream(sock, backend)
+        write_all(backend, buf) unless buf.empty?
+        copy_stream(sock, backend)
         relay_response_close(backend, sock)
         return :close
       end
@@ -270,13 +307,11 @@ module Yamine
       remaining = body_len
       unless buf.empty?
         from_buf = buf.byteslice(0, remaining)
-        backend.write(from_buf)
+        write_all(backend, from_buf)
         remaining -= from_buf.bytesize
         buf = buf.byteslice(from_buf.bytesize..) || +""
       end
-      if remaining > 0
-        IO.copy_stream(sock, backend, remaining)
-      end
+      copy_stream(sock, backend, remaining) if remaining > 0
 
       rhead, rbuf = read_head(backend, +"")
       if rhead.nil?
@@ -284,19 +319,17 @@ module Yamine
         return :close
       end
       _rm, _rt, rheaders = parse_head(rhead)
-      sock.write(rhead)
-      sock.write(rbuf) unless rbuf.empty?
+      write_all(sock, rhead)
+      write_all(sock, rbuf) unless rbuf.empty?
 
       rlen = content_length(rheaders)
       if rlen.nil?
         # No Content-Length: close-delimited response.
-        IO.copy_stream(backend, sock)
+        copy_stream(backend, sock)
         return :close
       end
       remaining = rlen - rbuf.bytesize
-      if remaining > 0
-        IO.copy_stream(backend, sock, remaining)
-      end
+      copy_stream(backend, sock, remaining) if remaining > 0
 
       if keep_alive?(headers) && keep_alive?(rheaders)
         # Any bytes beyond Content-Length on the backend are a second
@@ -311,9 +344,9 @@ module Yamine
       rhead, rbuf = read_head(backend, +"")
       return if rhead.nil?
 
-      sock.write(rhead)
-      sock.write(rbuf) unless rbuf.empty?
-      IO.copy_stream(backend, sock)
+      write_all(sock, rhead)
+      write_all(sock, rbuf) unless rbuf.empty?
+      copy_stream(backend, sock)
     rescue IOError, SystemCallError
       nil
     end
@@ -331,8 +364,8 @@ module Yamine
       set_forwarded(headers, sock, tls: @tls)
 
       backend = dial(entry)
-      backend.write(rebuild_head(method, target, headers))
-      backend.write(buf) unless buf.empty?
+      write_all(backend, rebuild_head(method, target, headers))
+      write_all(backend, buf) unless buf.empty?
       pipe_both(sock, backend)
     rescue SystemCallError, OpenSSL::SSL::SSLError, IOError => e
       @on_error.call("upgrade proxy error: #{e.message}")
@@ -369,9 +402,11 @@ module Yamine
       true
     end
 
-    # Read just the header block with readpartial (no stdio buffering,
-    # so nothing is stolen from the body stream). `buf` carries bytes
-    # read ahead (pipelined requests) across calls. Returns [head, buf].
+    # Read just the header block without stdio buffering (so nothing is
+    # stolen from the body stream). `buf` carries bytes read ahead
+    # (pipelined requests) across calls. Returns [head, buf]. The wait
+    # for more bytes is idle-bounded: a peer that sends nothing is
+    # dropped (nil) instead of pinning the thread.
     def read_head(sock, buf)
       loop do
         if (idx = buf.index("\r\n\r\n"))
@@ -379,11 +414,107 @@ module Yamine
         end
         return [nil, buf] if buf.bytesize > MAX_HEAD_BYTES
 
-        chunk = sock.readpartial(16_384)
-        buf << chunk
+        buf << read_chunk(sock, CHUNK_BYTES)
       end
     rescue EOFError, IOError
       [nil, +""]
+    end
+
+    # Finish a deferred TLS handshake under the idle bound. A no-op for
+    # plain sockets and for SSLSockets that already handshook (a second
+    # accept on an established connection returns immediately).
+    def tls_handshake(sock)
+      return unless sock.is_a?(OpenSSL::SSL::SSLSocket)
+
+      loop do
+        result = sock.accept_nonblock(exception: false)
+        return if result.is_a?(OpenSSL::SSL::SSLSocket)
+
+        wait_for(sock, result)
+      end
+    end
+
+    # One idle-bounded read: returns bytes, raises EOFError at end of
+    # stream, IdleTimeout when the peer is silent past the bound. Never
+    # blocks in the kernel without a select deadline, so no stalled peer
+    # pins the thread — including mid-TLS-handshake stalls, which plain
+    # readpartial would ride out forever.
+    def read_chunk(sock, size)
+      loop do
+        result = sock.read_nonblock(size, exception: false)
+        return result if result.is_a?(String)
+        raise EOFError, "end of file reached" if result.nil?
+
+        wait_for(sock, result)
+      end
+    end
+
+    # Idle-bounded write of the whole string. A peer that stops reading
+    # (full window) stalls here only until the bound, then IdleTimeout.
+    def write_all(sock, data)
+      offset = 0
+      while offset < data.bytesize
+        result = sock.write_nonblock(data.byteslice(offset..), exception: false)
+        if result.is_a?(Integer)
+          # A zero write made no progress: wait like a blocked writer
+          # instead of spinning.
+          result.zero? ? wait_for(sock, :wait_writable) : offset += result
+        else
+          wait_for(sock, result)
+        end
+      end
+      offset
+    end
+
+    # Idle-bounded relay. length nil copies to EOF (close-delimited or
+    # chunked-upload bodies); otherwise exactly length bytes. Every byte
+    # that moves resets the idle clock, so a slow trickle survives while
+    # a stalled source is abandoned with IdleTimeout. A truncated fixed
+    # body re-raises EOFError like IO.copy_stream did.
+    def copy_stream(src, dst, length = nil)
+      remaining = length
+      loop do
+        break if !remaining.nil? && remaining <= 0
+
+        size = remaining.nil? ? CHUNK_BYTES : [CHUNK_BYTES, remaining].min
+        begin
+          data = read_chunk(src, size)
+        rescue EOFError
+          raise if !remaining.nil? && remaining.positive?
+
+          break
+        end
+        write_all(dst, data)
+        remaining -= data.bytesize unless remaining.nil?
+      end
+    end
+
+    # Block until the socket is ready for the direction a nonblocking op
+    # asked for; IdleTimeout when the bound passes with no progress.
+    def wait_for(sock, wait_kind)
+      if wait_kind == :wait_readable
+        raise IdleTimeout, "idle timeout after #{@idle_timeout}s with no bytes" unless readable?(sock)
+      elsif !writable?(sock)
+        raise IdleTimeout, "idle timeout after #{@idle_timeout}s with no bytes"
+      end
+      nil
+    end
+
+    # select(2) with the idle bound. SSL-buffered bytes count as
+    # readable without a syscall. A closed socket raises in select —
+    # report not-ready and let the nonblocking op raise the real error.
+    def readable?(sock)
+      return true if sock.respond_to?(:pending) && sock.pending.positive?
+
+      !IO.select([sock], nil, nil, @idle_timeout).nil?
+    rescue IOError, SystemCallError
+      false
+    end
+
+    def writable?(sock)
+      !IO.select(nil, [sock], nil, @idle_timeout).nil?
+    rescue IOError, SystemCallError
+      false
     end
 
     def parse_head(head)
@@ -432,7 +563,9 @@ module Yamine
     end
 
     # Raw bidirectional pump for upgrades; either side closing unblocks
-    # the other.
+    # the other. Deliberately outside the idle bound: an idle websocket
+    # is legitimate traffic (silence is the normal state), and framing
+    # no longer applies once the connection is hijacked.
     def pipe_both(client, backend)
       t1 = Thread.new do
         IO.copy_stream(client, backend)
@@ -508,11 +641,11 @@ module Yamine
 
     def respond(sock, status, body)
       message = { 404 => "Not Found", 502 => "Bad Gateway", 508 => "Loop Detected" }[status]
-      sock.write("HTTP/1.1 #{status} #{message}\r\n" \
-                 "Content-Type: text/html\r\n" \
-                 "#{HEALTH_HEADER}: 1\r\n" \
-                 "Content-Length: #{body.bytesize}\r\n" \
-                 "Connection: close\r\n\r\n#{body}")
+      write_all(sock, "HTTP/1.1 #{status} #{message}\r\n" \
+                      "Content-Type: text/html\r\n" \
+                      "#{HEALTH_HEADER}: 1\r\n" \
+                      "Content-Length: #{body.bytesize}\r\n" \
+                      "Connection: close\r\n\r\n#{body}")
     rescue IOError, SystemCallError
       nil
     end
