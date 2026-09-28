@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-09-28
+
+### Added
+
+- **Every proxy socket wait is bounded by an idle timeout
+  (`YAMINE_PROXY_IDLE_TIMEOUT`, default 60s).** Silence is capped,
+  total duration is not: the timer resets on each byte transferred, so
+  a slow-but-moving transfer runs as long as it needs while a stalled
+  peer or a stale keep-alive socket is dropped instead of pinning a
+  thread until the proxy stops answering.
+- **`yamine doctor` gains a "serving ca" check.** It verifies the
+  certificate the proxy actually serves against the CA now on disk and
+  names the fix when they disagree — so a regenerated CA shows up in
+  doctor instead of surfacing later as `ERR_CERT_AUTHORITY_INVALID` in
+  the browser.
+
+### Changed
+
+- **`yamine proxy start` no longer spawns a second proxy when one
+  already serves the port.** It reports that idempotently (new
+  `ProxyAlreadyRunningError`) instead of recording a dead PID over
+  real state — the shape that left the recorded PID pointing at
+  nothing while the real proxy kept serving.
+- **`yamine proxy start` on a privileged port elevates the way the
+  boot path does.** One sudo prompt when interactive, or a failure
+  pointing at `yamine setup` when not — never a doomed unprivileged
+  child that dies on `EACCES` and leaves its PID behind.
+- **`yamine proxy stop` tells the truth about a proxy it cannot
+  signal.** On a dead recorded PID it probes the port first: a proxy
+  still serving — the root launchd/systemd service, which the CLI
+  cannot kill — yields a "still serving" answer with the restart
+  command and the recorded state kept, instead of "Removed stale
+  proxy state" while the proxy kept running.
+- **`yamine clean` refuses while a proxy it cannot stop is serving.**
+  It exits 1 instead of untrusting the CA and deleting the state
+  directory out from under a live root service.
+- **A running proxy reloads the signing CA when the pair on disk
+  changes.** It re-reads the CA files and drops cached host
+  certificates, so a regenerated CA takes effect without a restart —
+  previously only a restart fixed it, and until then the proxy kept
+  signing certificates no browser trusts.
+- **The TLS handshake moved out of the acceptor into the connection
+  thread.** A client that connects and sends nothing can no longer pin
+  an acceptor; acceptors now survive per-connection errors and keep
+  accepting.
+
+### Fixed
+
+- **A spawned daemon that dies before serving fails immediately with
+  the proxy log tail instead of a timeout.** A child killed by
+  `EACCES` on a privileged port (or anything else fatal at bind)
+  used to burn the whole wait and then record a PID that was never
+  alive; it now fails fast and records nothing.
+
 ## [0.19.0] — 2026-09-27
 
 ### Added
