@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "timeout"
 
 class ProxyRoutingTest < Minitest::Test
   def proxy
@@ -60,6 +61,24 @@ class ProxyRoutingTest < Minitest::Test
 end
 
 class ProxyLiveTest < Minitest::Test
+  # An upgraded connection is closed by the proxy's pump thread, not by
+  # this one: when the backend's side hits EOF, `pipe_both` shuts the
+  # client socket from a sibling thread. A read already parked on that
+  # socket is woken by the cross-thread close on macOS and left parked
+  # forever on linux — so `sock.read` (read-to-EOF) hung the whole unit
+  # suite on ubuntu and nothing on the developer's machine. The
+  # assertions need the bytes, not the EOF, so read until the payload
+  # lands, under an explicit bound.
+  def read_until(sock, marker, timeout: 5)
+    got = +""
+    Timeout.timeout(timeout) do
+      got << sock.readpartial(1024) until got.include?(marker)
+    end
+    got
+  rescue Timeout::Error, EOFError
+    flunk "no #{marker.inspect} within #{timeout}s of the upgrade; read #{got.inspect}"
+  end
+
   # End-to-end through a real TCP backend on an ephemeral port.
   def test_proxies_to_tcp_backend
     backend = TCPServer.new("127.0.0.1", 0)
@@ -184,7 +203,7 @@ class ProxyLiveTest < Minitest::Test
       "Connection: Upgrade\r\nUpgrade: websocket\r\n" \
       "Origin: https://myapp.localhost\r\n" \
       "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
-    response = sock.read
+    response = read_until(sock, "hello-ws")
     assert_includes response, "101 Switching Protocols"
     assert_includes response, "hello-ws"
 
@@ -196,6 +215,7 @@ class ProxyLiveTest < Minitest::Test
     assert_includes head, "x-forwarded-host: myapp.localhost"
     assert_includes head, "x-forwarded-for: 127.0.0.1"
   ensure
+    sock&.close
     backend&.close
     server&.close
     FileUtils.remove_entry(dir) if dir

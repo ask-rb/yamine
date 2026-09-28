@@ -121,9 +121,15 @@ class SupervisorTest < Minitest::Test
 
   def test_fresh_backend_not_idle_killed
     supervised_route
-    sup = supervisor(idle_timeout: 0.1)
+    # The gap has to stay well inside the idle window, not just inside
+    # it: `sleep` overshoots by however long the runner is busy, and at
+    # 0.05s against a 0.1s window any 50ms of scheduler noise crossed
+    # the threshold and killed a backend that was never idle. A 10x
+    # ratio keeps the assertion identical -- a second tick inside the
+    # window must not kill -- with slack a loaded runner cannot eat.
+    sup = supervisor(idle_timeout: 1.0)
     sup.tick
-    sleep 0.05
+    sleep 0.1
     sup.tick
     assert File.file?(File.join(@state, "backend-app.localhost.pid")),
       "freshly seen backend must not be killed before its idle window"
