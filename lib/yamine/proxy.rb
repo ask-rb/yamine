@@ -566,23 +566,49 @@ module Yamine
     # the other. Deliberately outside the idle bound: an idle websocket
     # is legitimate traffic (silence is the normal state), and framing
     # no longer applies once the connection is hijacked.
+    #
+    # Whichever direction reaches EOF first tears down BOTH ends, and it
+    # has to do that with shutdown before close. The sibling copy is
+    # parked in a blocking read on the socket being torn down, and a
+    # close from another thread does not interrupt that read on linux (it
+    # does on macOS) — so close-only left the parked copy alive forever
+    # and `t1.join` never returned: one leaked thread per closed upgrade,
+    # plus a `handle` that never unwound, in the root daemon. shutdown(2)
+    # changes the socket's kernel state instead of dropping the fd, so
+    # the parked read comes back with EOF at once — deterministic, and
+    # with no timeout added to a path that must stay unbounded.
     def pipe_both(client, backend)
       t1 = Thread.new do
         IO.copy_stream(client, backend)
       rescue IOError, SystemCallError
         nil
       ensure
-        backend.close rescue nil
+        teardown_half(backend)
       end
       t2 = Thread.new do
         IO.copy_stream(backend, client)
       rescue IOError, SystemCallError
         nil
       ensure
-        client.close rescue nil
+        teardown_half(client)
       end
       t1.join
       t2.join
+    end
+
+    # End one end of a hijacked connection: unblock the sibling copy
+    # first, then close. Runs from an ensure, so it swallows everything
+    # — an exception escaping here would unwind into the acceptor.
+    def teardown_half(sock)
+      # An SSLSocket (the TLS client's socket) has no #shutdown; its
+      # kernel socket is one level down, and that is the fd the parked
+      # read is sitting on.
+      io = sock.respond_to?(:shutdown) ? sock : sock.to_io
+      io.shutdown(Socket::SHUT_RDWR)
+    rescue StandardError
+      nil
+    ensure
+      sock.close rescue nil
     end
 
     # DNS-rebinding boundary: the proxy binds loopback, so any website
