@@ -8,7 +8,7 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -21,7 +21,7 @@ jobs:
           bundler-cache: true
       - name: Unit tests (fast, no live boots)
         run: bundle exec rake test
-        timeout-minutes: 8
+        timeout-minutes: 25
 
   e2e:
     runs-on: ${{ matrix.os }}
@@ -42,47 +42,3 @@ jobs:
       - name: End-to-end tests (daemon spawn, TLS, live boots)
         run: bundle exec rake test:e2e
         timeout-minutes: 20
-
-  fixtures:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: ask-local
-      - uses: actions/checkout@v4
-        with:
-          repository: ask-rb/ask-local-apps
-          ref: main
-          path: ask-local-apps
-          # Fixture fleet not yet published? Fall back to detection-only.
-        continue-on-error: true
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "4.0"
-          bundler-cache: true
-          working-directory: ask-local
-      - name: Install puma (managed-boot sweep)
-        run: gem install puma
-      - name: Fixture sweep (detection + inference + resolution)
-        working-directory: ask-local
-        run: |
-          bundle exec ruby -Ilib -e '
-            require "ask-local"
-            root = File.expand_path("../ask-local-apps", __dir__)
-            abort "fixture fleet missing at #{root}" unless File.directory?(root)
-            failures = []
-            Dir.glob("#{root}/*").sort.each do |d|
-              next unless File.directory?(d)
-              begin
-                fw = Ask::Local::Framework.detect(d)
-                name, src = Ask::Local::Inference.infer(d)
-                r = Ask::Local::Resolver.resolve(d)
-                urls = Ask::Local::Resolver.hostnames(r)
-                puts "#{File.basename(d).ljust(26)} #{fw.inspect.ljust(10)} #{urls.first}"
-              rescue StandardError => e
-                failures << "#{d}: #{e.message}"
-              end
-            end
-            abort failures.join("\n") unless failures.empty?
-          '

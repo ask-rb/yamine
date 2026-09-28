@@ -1,0 +1,10 @@
+service: shop
+proxy:
+  tld: localhost
+processes:
+  web:
+    cmd: puma -b tcp://127.0.0.1:$PORT config.ru
+    proxy: true
+  api:
+    cmd: puma -b tcp://127.0.0.1:$PORT config.ru
+    proxy: true

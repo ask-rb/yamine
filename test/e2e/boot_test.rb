@@ -35,7 +35,7 @@ class SupervisorBootOnRequestIntegrationTest < Minitest::Test
   # The full puma-dev cycle: request -> 200; backend killed; supervisor
   # marks dead; next request transparently boots a new backend -> 200.
   def test_boot_on_request_after_crash
-    app_dir = "/Users/kaka/Code/ask-rb/yamine-apps/bare-rack"
+    app_dir = File.expand_path("../fixtures/apps/bare-rack", __dir__)
     skip "fixture fleet not present" unless File.file?(File.join(app_dir, "config.ru"))
 
     state = Dir.mktmpdir

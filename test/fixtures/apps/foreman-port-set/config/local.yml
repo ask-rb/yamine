@@ -1,0 +1,17 @@
+  # config/local.yml — yamine configuration (Kamal-style).
+  # This is the only source of truth. Run `yamine` to boot everything.
+  # Overlay variants with config/local.<variant>.yml.
+
+  service: foreman-port-set
+
+  proxy:
+    tld: localhost
+
+  processes:
+    web:
+      cmd: bin/dev-server --port $PORT
+      proxy: true
+
+  env:
+    clear:
+      RAILS_ENV: development

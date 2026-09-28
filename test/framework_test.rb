@@ -39,36 +39,31 @@ class FrameworkTest < Minitest::Test
   end
 
   def test_sinatra_modular_is_rack
-    fleet = File.expand_path("../../yamine-apps/sinatra-modular", __dir__)
-    skip "fixture fleet not present" unless File.directory?(fleet)
+    fleet = File.expand_path("fixtures/apps/sinatra-modular", __dir__)
     assert_equal :rack, Yamine::Framework.detect(fleet)
   end
 
   def test_foreman_port_set_is_procfile_or_rack
-    fleet = File.expand_path("../../yamine-apps/foreman-port-set", __dir__)
-    skip "fixture fleet not present" unless File.directory?(fleet)
+    fleet = File.expand_path("fixtures/apps/foreman-port-set", __dir__)
     # config.ru exists so it reads as rack; the Procfile line already
     # carries $PORT, so run-mode injection must leave it alone.
     assert_includes %i[rack procfile], Yamine::Framework.detect(fleet)
   end
 
   def test_hanami2_slice_layout_is_rack
-    fleet = File.expand_path("../../yamine-apps/hanami2", __dir__)
-    skip "fixture fleet not present" unless File.directory?(fleet)
+    fleet = File.expand_path("fixtures/apps/hanami2", __dir__)
     assert_equal :rack, Yamine::Framework.detect(fleet)
     name, src = Yamine::Inference.infer(fleet)
     assert_equal "hanami2", name
   end
 
   def test_jekyll_livereload_detected
-    fleet = File.expand_path("../../yamine-apps/jekyll-livereload", __dir__)
-    skip "fixture fleet not present" unless File.directory?(fleet)
+    fleet = File.expand_path("fixtures/apps/jekyll-livereload", __dir__)
     assert_equal :jekyll, Yamine::Framework.detect(fleet)
   end
 
   def test_roda_plugins_is_rack
-    fleet = File.expand_path("../../yamine-apps/roda-plugins", __dir__)
-    skip "fixture fleet not present" unless File.directory?(fleet)
+    fleet = File.expand_path("fixtures/apps/roda-plugins", __dir__)
     assert_equal :rack, Yamine::Framework.detect(fleet)
   end
 

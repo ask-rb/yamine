@@ -508,10 +508,11 @@ bundle exec rake test
   self-signed, and there is no buffering or rate limiting.
 
 
-The `yamine-apps` fixture fleet (sibling checkout) exercises
+The `test/fixtures/apps/` fixture fleet exercises
 detection, inference, and boot across Rails variants, Roda, Sinatra,
-bare Rack, Jekyll, compound Procfiles, and a monorepo. CI runs the
-fixture sweep automatically.
+bare Rack, Jekyll, compound Procfiles, and a monorepo. It ships with
+the repo and runs as part of the unit suite across the Ruby matrix —
+no sibling checkout, no separate CI job.
 
 ## License
 

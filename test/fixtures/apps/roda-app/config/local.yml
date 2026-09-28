@@ -1,0 +1,7 @@
+service: roda-app
+proxy:
+  tld: localhost
+processes:
+  web:
+    cmd: puma -b tcp://127.0.0.1:$PORT config.ru
+    proxy: true

@@ -1,0 +1,17 @@
+  # config/local.yml — yamine configuration (Kamal-style).
+  # This is the only source of truth. Run `yamine` to boot everything.
+  # Overlay variants with config/local.<variant>.yml.
+
+  service: jekyll-livereload
+
+  proxy:
+    tld: localhost
+
+  processes:
+    web:
+      cmd: bin/rails server -p $PORT
+      proxy: true
+
+  env:
+    clear:
+      RAILS_ENV: development
