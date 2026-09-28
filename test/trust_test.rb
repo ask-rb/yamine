@@ -303,6 +303,12 @@ class StaleCaReportingTest < Minitest::Test
     dir = Dir.mktmpdir
     Yamine::Certs.ensure_ca(dir)
     Yamine::Certs.mark_trusted(dir)
+    # check_ca reads the ambient state dir, not the CA we just built, so
+    # pin it to this test's own. Left ambient, the test only passes where
+    # the developer's real ~/.yamine already holds a trusted CA; anywhere
+    # else (CI, a fresh container) check_ca short-circuits to "no CA yet"
+    # and the stale-CA warning under test never runs.
+    Yamine::Certs.stubs(:state_dir).returns(dir)
     Yamine::Doctor.stubs(:stale_ca_count).returns(2)
 
     check = Yamine::Doctor.check_ca

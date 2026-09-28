@@ -198,9 +198,29 @@ class BootOrphanSafetyTest < Minitest::Test
     File.write(File.join(@dir, "config", "local.yml"), content)
   end
 
+  # Scoped to THIS test's marker path: a leftover from a sibling test (or
+  # an earlier run in the same container) says nothing about the spawn
+  # under test, and would otherwise fail the assertion for the wrong
+  # reason.
+  #
+  # Invoked as an argv array, never through a shell: backticks run
+  # `sh -c "pgrep -f <marker>"`, and on linux dash forks instead of
+  # exec'ing, so the shell's own cmdline matches the pattern and the test
+  # reports *itself* as the orphan it is about to assert on.
   def marker_processes
-    out = `pgrep -f unique-backend-marker 2>/dev/null`.split("\n").map(&:to_i)
-    out.reject { |pid| pid == Process.pid }
+    out = IO.popen(["pgrep", "-f", @marker], err: File::NULL, &:read)
+    out.split("\n").map(&:to_i).reject { |pid| pid == Process.pid }
+  end
+
+  # Reaping is asynchronous: the child is TERMed and exits on its own
+  # schedule, so a fixed sleep is a race the slower runner loses. Poll
+  # to a bound, then assert once — the behavior under test (no orphaned
+  # backend) is unchanged, only the wait.
+  def assert_reaped(message, timeout: 5)
+    deadline = Time.now + timeout
+    sleep 0.05 while marker_processes.any? && Time.now < deadline
+
+    assert_empty marker_processes, message
   end
 
   # boot_run must not leave the backend alive when registration is
@@ -215,14 +235,17 @@ class BootOrphanSafetyTest < Minitest::Test
     store.expects(:add_route).once.raises(
       Yamine::QuotaExceededError.new("agent", 1, 1))
 
+    # Spawn the backend directly: the command has no metacharacters, and
+    # behind a `sh -c` wrapper the pid yamine tracks is the SHELL — TERM
+    # to that wrapper never reaches the backend behind it (on linux dash
+    # forks rather than exec'ing, and forwards nothing), so the orphan
+    # would be an artifact of the wrapper, not of the reaping under test.
     assert_raises(Yamine::QuotaExceededError) do
       runner.boot_run(name: "web", hostname: "x.localhost",
         url: "https://x.localhost", dir: @dir,
-        command: ["sh", "-c", "ruby #{@marker}"], port: port)
+        command: ["ruby", @marker], port: port)
     end
-    sleep 0.5
-    assert_empty marker_processes,
-      "a backend whose registration was refused must be reaped"
+    assert_reaped "a backend whose registration was refused must be reaped"
   end
 
   # A raise mid-boot (route conflict from adopt, unexpected error) must
@@ -233,7 +256,11 @@ class BootOrphanSafetyTest < Minitest::Test
       db: false
       processes:
         web:
-          cmd: ruby #{@marker}
+          # exec: collect_spawns wraps every cmd in `sh -c`, and TERM to
+          # that wrapper never reaches the backend behind it. exec hands
+          # the tracked pid to the backend, so the assertion stays on the
+          # reaping this failure path is responsible for.
+          cmd: exec ruby #{@marker}
           proxy: true
     YAML
     ctx = Yamine::CLI::Context.new
@@ -249,9 +276,7 @@ class BootOrphanSafetyTest < Minitest::Test
         Yamine::CLI::BootCommand.boot_all(ctx, resolved, {})
       end
     end
-    sleep 0.5
-    assert_empty marker_processes,
-      "a raise after spawn must not orphan the backend"
+    assert_reaped "a raise after spawn must not orphan the backend"
     assert_empty ctx.store.load_routes_raw,
       "a raise after registration must not leave routes behind"
   end
