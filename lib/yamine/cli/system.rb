@@ -53,9 +53,10 @@ module Yamine
         sub = args.first
         case sub
         when "sync"
-          hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
+          store = privileged_store(ctx)
+          hostnames = store.load_routes.map { |r| r["hostname"] }
           begin
-            tlds = Hosts.default_scope_tlds(ctx.store.dir)
+            tlds = Hosts.default_scope_tlds(store.dir)
             if Hosts.sync(hostnames, Hosts::PATH, tlds: tlds)
               puts "Synced #{hostnames.length} hostname(s) to /etc/hosts."
             elsif !ProxyControl.root? && !hostnames.empty?
@@ -70,10 +71,7 @@ module Yamine
                 $stderr.puts "  (that stages the root-owned payload; steady-state syncs then work via the grant from `yamine sudoers`)"
                 exit 1
               end
-              state = Certs.state_dir
-              cmd = ["env", "YAMINE_STATE_DIR=#{state}", RbConfig.ruby,
-                PrivilegedPayload.bin_path, "hosts", "sync"]
-              exit(elevate(cmd) ? 0 : 1)
+              exit(elevate(granted_hosts_sync_argv) ? 0 : 1)
             else
               $stderr.puts "Could not write /etc/hosts (try sudo)."
               exit 1
@@ -224,6 +222,31 @@ module Yamine
         end
       end
 
+      # The exact argv sudo runs for each passwordless grant rule.
+      # Single source of truth: `sudoers` prints these and the
+      # elevation call sites invoke them byte-identical. sudo matches
+      # the command path plus every concatenated argument and strips
+      # no `env` prefix, so any drift here — an env wrapper, a
+      # reordered flag, an unescaped space — silently disables the
+      # grant and `sudo -n` fails with "a password is required". The
+      # parity test pins both sides to these arrays. Evaluated per
+      # call (not constants): the staged path honors
+      # YAMINE_PRIVILEGED_ROOT.
+      def granted_hosts_sync_argv
+        [RbConfig.ruby, PrivilegedPayload.bin_path, "hosts", "sync"]
+      end
+
+      def granted_uninstall_argv
+        [RbConfig.ruby, PrivilegedPayload.bin_path, "service", "uninstall", "--internal"]
+      end
+
+      # sudoers splits a command spec on unescaped spaces, so a staged
+      # path containing one ("/Library/Application Support/...") must
+      # be escaped or the rule can never match anything.
+      def sudoers_escape(word)
+        word.to_s.gsub(" ", "\\ ")
+      end
+
       # Print the scoped passwordless-sudo rules for steady-state agent
       # work. The grant pins the ROOT-OWNED staged payload at its
       # version-independent path — never the user-writable gem
@@ -243,9 +266,10 @@ module Yamine
       #   Linux: sudo install -o root -g root -m 440 <(yamine sudoers) /etc/sudoers.d/yamine
       def sudoers(_ctx, _args)
         require "etc"
-        ruby = RbConfig.ruby
-        staged = PrivilegedPayload.bin_path
         user = ENV.fetch("USER", Etc.getlogin)
+        rules = [granted_hosts_sync_argv, granted_uninstall_argv].map do |argv|
+          "#{user} ALL=(root) NOPASSWD: #{argv.map { |w| sudoers_escape(w) }.join(" ")}"
+        end
         puts <<~SUDOERS
           # yamine: steady-state passwordless rules for #{user}. The staged
           # payload below is root-owned at a version-independent path, so
@@ -253,8 +277,7 @@ module Yamine
           # if your installed file still pins a version-stamped gem path.
           # Service install/upgrade is deliberately absent: staging new
           # root-executed code needs an interactive sudo (Touch ID).
-          #{user} ALL=(root) NOPASSWD: #{ruby} #{staged} hosts sync
-          #{user} ALL=(root) NOPASSWD: #{ruby} #{staged} service uninstall --internal
+          #{rules.join("\n")}
         SUDOERS
       end
 
@@ -286,9 +309,11 @@ module Yamine
           false
         else
           puts "Installing system service (sudo required)..."
-          state = Certs.state_dir
-          cmd = ["env", "YAMINE_STATE_DIR=#{state}",
-            RbConfig.ruby, ProxyControl.bin_path,
+          # No `env` prefix: nothing crosses the sudo boundary, and no
+          # grant rule needs to match this — the human sudo prompts.
+          # The root half derives the invoking user's state dir from
+          # SUDO_USER (see privileged_store).
+          cmd = [RbConfig.ruby, ProxyControl.bin_path,
             "service", "install", "--internal"]
           elevate(cmd)
         end
@@ -299,7 +324,8 @@ module Yamine
         # any unit exists, so a failed install can never leave a unit
         # pointing at an unverified payload — and the running daemon
         # (legacy or current) keeps serving untouched.
-        version = PrivilegedPayload.stage!(state_dir: ctx.store.dir)
+        store = privileged_store(ctx)
+        version = PrivilegedPayload.stage!(state_dir: store.dir)
         puts "    Staged privileged payload v#{version} (#{PrivilegedPayload.root_dir})."
         case RUBY_PLATFORM
         when /darwin/ then install_launchd(ctx)
@@ -327,7 +353,8 @@ module Yamine
       end
 
       def sync_hosts_from_routes(ctx)
-        hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
+        store = privileged_store(ctx)
+        hostnames = store.load_routes.map { |r| r["hostname"] }
         if hostnames.empty?
           puts "    No routes registered yet — hosts sync will happen on the next boot."
         elsif Yamine::Hosts.synced?(hostnames)
@@ -335,7 +362,7 @@ module Yamine
         else
           begin
             if Yamine::Hosts.sync(hostnames, Yamine::Hosts::PATH,
-              tlds: Yamine::Hosts.default_scope_tlds(ctx.store.dir))
+              tlds: Yamine::Hosts.default_scope_tlds(store.dir))
               puts "    Synced #{hostnames.length} hostname(s) to /etc/hosts."
             else
               warn "    could not write /etc/hosts (run `sudo yamine hosts sync` later)"
@@ -386,6 +413,27 @@ module Yamine
         end
       rescue ArgumentError
         Certs.home
+      end
+
+      # The invoking user's state dir inside the root half of a sudo
+      # re-exec. Nothing crosses the sudo boundary (no `env` prefix, no
+      # SETENV — which would let RUBYOPT/RUBYLIB smuggle code into the
+      # root process): sudo sets SUDO_USER itself, while env_reset makes
+      # HOME root's, so HOME alone is not enough. Same SUDO_USER
+      # precedent as user_home_for_service; unprivileged resolution
+      # (Certs.state_dir) is untouched.
+      def invoking_state_dir
+        File.join(user_home_for_service, ".yamine")
+      end
+
+      # The store a root half acts on. As root, ctx.store would resolve
+      # through root's HOME — but the invoking user's routes live under
+      # their own dir, so derive it instead. Unprivileged runs keep
+      # ctx.store untouched.
+      def privileged_store(ctx)
+        return ctx.store unless ProxyControl.root?
+
+        RouteStore.new(invoking_state_dir, on_warning: ->(m) { warn m })
       end
 
       def install_launchd(ctx, dir = "/Library/LaunchDaemons")
@@ -549,14 +597,11 @@ module Yamine
 
       def service_uninstall(ctx)
         if !ProxyControl.root?
-          state = Certs.state_dir
           if PrivilegedPayload.staged?
             # The grant covers exactly this argv: the root-owned staged
             # payload removing yamine's own files. Passwordless-capable.
             puts "Removing system service (sudo required)..."
-            cmd = ["env", "YAMINE_STATE_DIR=#{state}",
-              RbConfig.ruby, PrivilegedPayload.bin_path, "service", "uninstall", "--internal"]
-            return elevate(cmd)
+            return elevate(granted_uninstall_argv)
           elsif !ctx.interactive?
             $stderr.puts "No staged payload is installed, so uninstall needs an interactive sudo."
             $stderr.puts "  Human: run in a terminal — sudo yamine service uninstall"
@@ -564,10 +609,9 @@ module Yamine
           else
             # Legacy cleanup: no staged payload, but a legacy unit may
             # still be installed. Human sudo only — no grant covers the
-            # gem path anymore.
+            # gem path anymore, and nothing crosses the sudo boundary.
             puts "Removing system service (sudo required)..."
-            cmd = ["env", "YAMINE_STATE_DIR=#{state}",
-              RbConfig.ruby, ProxyControl.bin_path, "service", "uninstall", "--internal"]
+            cmd = [RbConfig.ruby, ProxyControl.bin_path, "service", "uninstall", "--internal"]
             return elevate(cmd, hint: :human)
           end
         end

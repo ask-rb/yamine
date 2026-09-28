@@ -30,8 +30,9 @@ class SudoersGrantTest < Minitest::Test
 
   def test_grant_pins_the_staged_version_independent_path
     staged = Yamine::PrivilegedPayload.bin_path
+    escaped = Yamine::CLI::SystemCommand.sudoers_escape(staged)
 
-    assert_includes sudoers_output, staged
+    assert_includes sudoers_output, escaped
     refute_match(%r{/gems/yamine-}, sudoers_output,
       "the grant must not pin a version-stamped gem path that rots every release")
   end
@@ -110,7 +111,7 @@ class ServiceInstallElevationTest < Minitest::Test
     bin = Yamine::ProxyControl.bin_path
 
     Yamine::Command.expects(:run)
-      .with("sudo", "env", "YAMINE_STATE_DIR=#{state}", ruby, bin,
+      .with("sudo", ruby, bin,
         "service", "install", "--internal")
       .returns(true)
 
@@ -291,7 +292,7 @@ class HostsElevationTest < Minitest::Test
     Yamine::PrivilegedPayload.stubs(:staged?).returns(true)
     staged = Yamine::PrivilegedPayload.bin_path
     Yamine::Command.expects(:run)
-      .with("sudo", "-n", "env", "YAMINE_STATE_DIR=#{@dir}", RbConfig.ruby, staged, "hosts", "sync")
+      .with("sudo", "-n", RbConfig.ruby, staged, "hosts", "sync")
       .returns(true)
 
     code, out, = run_cli("hosts", "sync")
@@ -322,6 +323,9 @@ class HostsElevationTest < Minitest::Test
   def test_out_of_scope_hostnames_fail_with_the_policy
     write_route("github.com")
     Yamine::ProxyControl.stubs(:root?).returns(true)
+    # The root half derives the state dir from SUDO_USER instead of
+    # taking it across sudo — pin that seam at the test dir.
+    Yamine::CLI::SystemCommand.stubs(:invoking_state_dir).returns(@dir)
 
     code, _out, err = run_cli("hosts", "sync")
 

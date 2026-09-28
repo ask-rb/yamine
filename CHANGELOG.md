@@ -51,8 +51,21 @@
   provisioning story: humans install the 443 service once per machine,
   agents keep hosts entries fresh through the grant.
 
-### Open caveat (not closed, stated plainly)
+### Fixed
 
+- **The printed grant now matches what the CLI invokes, byte for
+  byte.** Elevated re-execs went through `env YAMINE_STATE_DIR=…`,
+  which made the command `/usr/bin/env` — a path no rule names — so
+  every passwordless attempt fell through to the password-required
+  admin rule; and the staged macOS path's space was unescaped in the
+  sudoers output, so that rule could never match either. No
+  environment crosses sudo anymore (no `env` prefix, no SETENV): the
+  root half derives the invoking user's state dir from `SUDO_USER`,
+  and spaces are backslash-escaped when the rules are printed. Pinned
+  by a parity test that parses the printed specs and asserts equality
+  with the captured elevated argv.
+
+### Open caveat (not closed, stated plainly)
 - **The interpreter is still user-writable.** No root-owned Ruby ≥ 3.2
   exists on a stock machine, so the daemon necessarily runs the
   invoking (user-writable) Ruby. The payload is root-owned; the

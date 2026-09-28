@@ -51,7 +51,7 @@ class SudoersTest < Minitest::Test
     assert_includes out, "hosts sync"
     assert_includes out, "service uninstall --internal"
     assert_includes out, RbConfig.ruby
-    assert_includes out, Yamine::PrivilegedPayload.bin_path
+    assert_includes out, Yamine::CLI::SystemCommand.sudoers_escape(Yamine::PrivilegedPayload.bin_path)
     # The whole point: the grant pins the root-owned staged payload,
     # never the user-writable gem directory — and it can never stage
     # new root-executed code, so install stays out.
@@ -307,7 +307,7 @@ class ElevatePromptSafetyTest < Minitest::Test
     bin = Yamine::ProxyControl.bin_path
 
     Yamine::Command.expects(:run)
-      .with("sudo", "env", "YAMINE_STATE_DIR=#{state}", ruby, bin,
+      .with("sudo", ruby, bin,
         "service", "install", "--internal")
       .returns(true)
 
