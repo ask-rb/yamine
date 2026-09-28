@@ -13,9 +13,16 @@ class HostsScopeTest < Minitest::Test
     @dir = Dir.mktmpdir
     @path = File.join(@dir, "hosts")
     File.write(@path, "127.0.0.1 localhost\n")
+    # Hermetic: redirect the privileged root into the tmpdir so the
+    # suite never inherits the machine's staged allowlist — without
+    # this, default_scope_tlds answers from /Library on staged machines
+    # and the proxy.tlds fallback below is never exercised.
+    @orig_privileged_root = ENV["YAMINE_PRIVILEGED_ROOT"]
+    ENV["YAMINE_PRIVILEGED_ROOT"] = File.join(@dir, "privileged-root")
   end
 
   def teardown
+    ENV["YAMINE_PRIVILEGED_ROOT"] = @orig_privileged_root
     FileUtils.remove_entry(@dir)
   end
 
@@ -116,8 +123,9 @@ class HostsScopeTest < Minitest::Test
 
   def test_default_scope_prefers_the_root_owned_allowlist
     File.write(File.join(@dir, "proxy.tlds"), "stale.example.com\n")
-    Yamine::PrivilegedPayload.stubs(:allowlist_file).returns(File.join(@dir, "allowed-tlds"))
-    File.write(File.join(@dir, "allowed-tlds"), "kept.example.com\n")
+    staged = Yamine::PrivilegedPayload.allowlist_file
+    FileUtils.mkdir_p(File.dirname(staged))
+    File.write(staged, "kept.example.com\n")
 
     tlds = Yamine::Hosts.default_scope_tlds(@dir)
 

@@ -10,9 +10,14 @@ class HostsTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
     @path = File.join(@dir, "hosts")
+    # Hermetic: sync falls back to default_scope_tlds, which must not
+    # read the machine's staged allowlist (see HostsScopeTest).
+    @orig_privileged_root = ENV["YAMINE_PRIVILEGED_ROOT"]
+    ENV["YAMINE_PRIVILEGED_ROOT"] = File.join(@dir, "privileged-root")
   end
 
   def teardown
+    ENV["YAMINE_PRIVILEGED_ROOT"] = @orig_privileged_root
     FileUtils.remove_entry(@dir)
   end
 
