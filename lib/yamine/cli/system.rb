@@ -8,7 +8,7 @@ module Yamine
       # enable/kickstart/bootout` address it by. Renamed from "dev.ask.local"
       # (an ask-local leftover); the old label is cleared on install so the
       # two never coexist and fight over port 443.
-      LAUNCHD_LABEL = "dev.yamine"
+      LAUNCHD_LABEL = PrivilegedPayload::LAUNCHD_LABEL
       LEGACY_LAUNCHD_LABELS = %w[dev.ask.local].freeze
 
       module_function
@@ -54,19 +54,32 @@ module Yamine
         case sub
         when "sync"
           hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
-          if Hosts.sync(hostnames)
-            puts "Synced #{hostnames.length} hostname(s) to /etc/hosts."
-          elsif !ProxyControl.root? && !hostnames.empty?
-            # /etc/hosts is root-owned; once the root service is
-            # installed the guidance is "run yamine hosts sync" — so
-            # make that command work by re-running it elevated.
-            puts "Writing /etc/hosts needs root — re-running elevated..."
-            state = Certs.state_dir
-            cmd = ["env", "YAMINE_STATE_DIR=#{state}", RbConfig.ruby,
-              ProxyControl.bin_path, "hosts", "sync"]
-            exit(elevate(cmd) ? 0 : 1)
-          else
-            $stderr.puts "Could not write /etc/hosts (try sudo)."
+          begin
+            tlds = Hosts.default_scope_tlds(ctx.store.dir)
+            if Hosts.sync(hostnames, Hosts::PATH, tlds: tlds)
+              puts "Synced #{hostnames.length} hostname(s) to /etc/hosts."
+            elsif !ProxyControl.root? && !hostnames.empty?
+              # /etc/hosts is root-owned; once the root service is
+              # installed the guidance is "run yamine hosts sync" — so
+              # make that command work by re-running it elevated through
+              # the STAGED payload (root-owned, version-independent).
+              # The gem directory is never executed as root here.
+              puts "Writing /etc/hosts needs root — re-running elevated..."
+              unless PrivilegedPayload.staged?
+                $stderr.puts "No staged payload is installed — run once in a terminal: sudo yamine service install"
+                $stderr.puts "  (that stages the root-owned payload; steady-state syncs then work via the grant from `yamine sudoers`)"
+                exit 1
+              end
+              state = Certs.state_dir
+              cmd = ["env", "YAMINE_STATE_DIR=#{state}", RbConfig.ruby,
+                PrivilegedPayload.bin_path, "hosts", "sync"]
+              exit(elevate(cmd) ? 0 : 1)
+            else
+              $stderr.puts "Could not write /etc/hosts (try sudo)."
+              exit 1
+            end
+          rescue Error => e
+            $stderr.puts "Error: #{e.message}"
             exit 1
           end
         when "clean"
@@ -107,10 +120,11 @@ module Yamine
             privileged = port < 1024 && !ProxyControl.root?
             if privileged && !ctx.interactive?
               $stderr.puts "Error: proxy is not running and port #{port} needs root."
-              $stderr.puts "  Human: run this once — yamine setup"
-              $stderr.puts "  Agent/CI: pre-provision passwordless sudo once —"
-              $stderr.puts "    yamine sudoers > /tmp/yamine.sudoers"
-              $stderr.puts "    sudo install -o root -g wheel -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine"
+              $stderr.puts "  Human: run this once in a terminal — yamine setup (or: sudo yamine service install)"
+              $stderr.puts "  Agent/CI: the 443 service is installed by a human once per machine — it cannot be provisioned passwordlessly."
+              $stderr.puts "    Steady-state hosts sync works via the grant instead:"
+              $stderr.puts "      yamine sudoers > /tmp/yamine.sudoers"
+              $stderr.puts "      sudo install -o root -g wheel -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine"
               $stderr.puts "  Or start the proxy by hand: sudo yamine proxy start"
               exit 1
             end
@@ -210,25 +224,37 @@ module Yamine
         end
       end
 
-      # Print the scoped passwordless-sudo rules that let `service install`
-      # (and only it) run without a prompt. The service re-execs the whole
-      # gem under sudo, so the safe NOPASSWD grants exactly the gem path +
-      # subcommand for the current user — never a bare interpreter. This is
-      # how agents and repeat machines get clean :443 without a TTY.
+      # Print the scoped passwordless-sudo rules for steady-state agent
+      # work. The grant pins the ROOT-OWNED staged payload at its
+      # version-independent path — never the user-writable gem
+      # directory — and keeps only what can never introduce or modify
+      # root-executed code: the data-only `hosts sync` (hostnames
+      # strictly validated inside the managed /etc/hosts block) and
+      # `service uninstall` (which only deletes yamine's own files).
+      # Installing or upgrading the staged payload stages user-writable
+      # source into root-owned paths, so it stays a human-authorized
+      # interactive sudo and is deliberately NOT in this grant.
+      #
+      # Re-run after upgrading if your /etc/sudoers.d/yamine still pins
+      # a version-stamped gem path: those rules go stale every release.
+      # This output never does.
       #
       #   macOS: sudo install -o root -g wheel -m 440 <(yamine sudoers) /etc/sudoers.d/yamine
       #   Linux: sudo install -o root -g root -m 440 <(yamine sudoers) /etc/sudoers.d/yamine
       def sudoers(_ctx, _args)
         require "etc"
         ruby = RbConfig.ruby
-        bin = ProxyControl.bin_path
+        staged = PrivilegedPayload.bin_path
         user = ENV.fetch("USER", Etc.getlogin)
         puts <<~SUDOERS
-          # yamine: let #{user} install/run the privileged proxy on port 443
-          # without a password prompt. Scoped to yamine's own service
-          # re-exec — the gem path above, not a bare interpreter.
-          #{user} ALL=(root) NOPASSWD: #{ruby} #{bin} service install --internal
-          #{user} ALL=(root) NOPASSWD: #{ruby} #{bin} service uninstall --internal
+          # yamine: steady-state passwordless rules for #{user}. The staged
+          # payload below is root-owned at a version-independent path, so
+          # these rules survive gem upgrades — re-run `yamine sudoers` once
+          # if your installed file still pins a version-stamped gem path.
+          # Service install/upgrade is deliberately absent: staging new
+          # root-executed code needs an interactive sudo (Touch ID).
+          #{user} ALL=(root) NOPASSWD: #{ruby} #{staged} hosts sync
+          #{user} ALL=(root) NOPASSWD: #{ruby} #{staged} service uninstall --internal
         SUDOERS
       end
 
@@ -238,11 +264,12 @@ module Yamine
       # routes registered by unprivileged CLIs are shared. The root half
       # can also write /etc/hosts.
       #
-      # Non-interactive runs (agents, CI) use `sudo -n`: never prompts,
-      # succeeds only when the scoped NOPASSWD grant from `yamine
-      # sudoers` is installed, and fails fast with guidance otherwise.
-      # Interactive runs use plain sudo (one password, then the service
-      # is installed for good).
+      # Staging user-writable source into root-owned paths is never
+      # passwordless: non-interactive runs (agents, CI) fail fast
+      # pointing at the human step, because the grant from `yamine
+      # sudoers` deliberately covers no install rule. Interactive runs
+      # use plain sudo (one Touch ID tap), then the service is installed
+      # for good.
       #
       # Returns true when the service is installed. No exit here: the
       # bare `service install` CLI exits in `service`, while `setup`
@@ -251,7 +278,12 @@ module Yamine
         if ProxyControl.root?
           install_service!(ctx)
         elsif args.include?("--internal")
-          raise Error, "`service install --internal` is the root half of the sudo re-exec — run `yamine service install`"
+          raise Error, "`service install --internal` is the root half of the sudo re-exec — run `sudo yamine service install` in a terminal"
+        elsif !ctx.interactive?
+          $stderr.puts "service install stages root-executed code, so it needs an interactive sudo (one Touch ID tap) — it is deliberately not covered by the passwordless grant."
+          $stderr.puts "  Human: run in a terminal — sudo yamine service install"
+          $stderr.puts "  Agents: the 443 service is installed by a human once per machine; steady-state hosts sync works via the grant — yamine sudoers"
+          false
         else
           puts "Installing system service (sudo required)..."
           state = Certs.state_dir
@@ -263,6 +295,12 @@ module Yamine
       end
 
       def install_service!(ctx)
+        # Stage first, register second: a staging failure raises before
+        # any unit exists, so a failed install can never leave a unit
+        # pointing at an unverified payload — and the running daemon
+        # (legacy or current) keeps serving untouched.
+        version = PrivilegedPayload.stage!(state_dir: ctx.store.dir)
+        puts "    Staged privileged payload v#{version} (#{PrivilegedPayload.root_dir})."
         case RUBY_PLATFORM
         when /darwin/ then install_launchd(ctx)
         when /linux/ then install_systemd
@@ -272,7 +310,20 @@ module Yamine
         # far while elevated — Safari works the moment setup finishes
         # (Chrome resolves *.localhost natively).
         sync_hosts_from_routes(ctx)
+        print_interpreter_note
         true
+      end
+
+      # The interpreter caveat, said out loud at every install: the unit
+      # runs a user-writable Ruby (no root-owned Ruby >= 3.2 exists on
+      # this machine), so the payload being root-owned is necessary but
+      # not sufficient. Never papered over.
+      def print_interpreter_note
+        ruby = PrivilegedPayload.ruby_info
+        return unless ruby[:writable]
+
+        puts "    NOTE: the service runs #{ruby[:path]}, which is user-writable —"
+        puts "    only the staged payload above is root-owned. See README (port 443) for the residual risk."
       end
 
       def sync_hosts_from_routes(ctx)
@@ -281,18 +332,28 @@ module Yamine
           puts "    No routes registered yet — hosts sync will happen on the next boot."
         elsif Yamine::Hosts.synced?(hostnames)
           puts "    /etc/hosts already lists #{hostnames.length} hostname(s)."
-        elsif Yamine::Hosts.sync(hostnames)
-          puts "    Synced #{hostnames.length} hostname(s) to /etc/hosts."
         else
-          warn "    could not write /etc/hosts (run `sudo yamine hosts sync` later)"
+          begin
+            if Yamine::Hosts.sync(hostnames, Yamine::Hosts::PATH,
+              tlds: Yamine::Hosts.default_scope_tlds(ctx.store.dir))
+              puts "    Synced #{hostnames.length} hostname(s) to /etc/hosts."
+            else
+              warn "    could not write /etc/hosts (run `sudo yamine hosts sync` later)"
+            end
+          rescue Error => e
+            warn "    hosts sync skipped: #{e.message}"
+          end
         end
       end
 
       # Run a privileged command via sudo. Interactive: plain sudo (one
-      # prompt). Non-interactive: `sudo -n` — no prompt ever; requires the
-      # NOPASSWD grant from `yamine sudoers`. On failure prints the
+      # prompt). Non-interactive: `sudo -n` — no prompt ever; requires
+      # the NOPASSWD grant from `yamine sudoers`. On failure prints the
       # provisioning hint so agents/CI know exactly what to install.
-      def elevate(cmd)
+      # The :grant hint names the passwordless rules (hosts sync,
+      # uninstall); :human points at the interactive install step, for
+      # commands no grant will ever cover.
+      def elevate(cmd, hint: :grant)
         interactive = $stdin.tty? && ENV["CI"].nil?
         sudo_args = interactive ? ["sudo"] : ["sudo", "-n"]
         ok = Command.run(*sudo_args, *cmd)
@@ -304,6 +365,9 @@ module Yamine
         # runs, where a missing NOPASSWD rule is the usual cause.
         if interactive
           $stderr.puts "sudo failed — re-run `yamine setup` to try again."
+        elsif hint == :human
+          $stderr.puts "sudo failed — this step needs an interactive sudo (one Touch ID tap)."
+          $stderr.puts "  Human: run in a terminal — sudo yamine service install"
         else
           $stderr.puts "sudo failed — install the scoped grant once:"
           $stderr.puts "  yamine sudoers > /tmp/yamine.sudoers"
@@ -324,12 +388,15 @@ module Yamine
         Certs.home
       end
 
-      def install_launchd(ctx)
+      def install_launchd(ctx, dir = "/Library/LaunchDaemons")
         require "etc"
         home = user_home_for_service
         state_dir = ENV["YAMINE_STATE_DIR"] || File.join(home, ".yamine")
-        dir = "/Library/LaunchDaemons"
-        FileUtils.mkdir_p(dir)
+        # The unit references ONLY the root-owned staged payload — never
+        # the user-writable gem directory it was staged from. (The
+        # interpreter stays RbConfig.ruby: no root-owned Ruby >= 3.2
+        # exists, so that residual risk is reported, not hidden.)
+        payload_bin = PrivilegedPayload.bin_path
         plist = <<~PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -339,7 +406,7 @@ module Yamine
             <key>ProgramArguments</key>
             <array>
               <string>#{RbConfig.ruby}</string>
-              <string>#{ProxyControl.bin_path}</string>
+              <string>#{payload_bin}</string>
               <string>proxy</string><string>start</string><string>--foreground</string>
               <string>--port</string><string>#{ProxyControl::DEFAULT_TLS_PORT}</string>
             </array>
@@ -354,6 +421,7 @@ module Yamine
           </plist>
         PLIST
         remove_legacy_launchd(dir)
+        FileUtils.mkdir_p(dir)
         path = File.join(dir, "#{LAUNCHD_LABEL}.plist")
         File.write(path, plist)
         File.chmod(0o644, path)
@@ -369,6 +437,7 @@ module Yamine
         puts "    Registering the launchd service on port 443..."
         launchctl_bootstrap(path)
         puts "Installed root LaunchDaemon on port 443 (state: #{state_dir})."
+        puts "    Payload: #{payload_bin} (root-owned, version-independent)."
       end
 
       # True when the trust store covers the CA this machine should be
@@ -444,7 +513,8 @@ module Yamine
       end
 
       # Pure unit-file builder (testable without root). Binds 80/443 at
-      # boot; the proxy runs with the invoking user's state dir.
+      # boot; the proxy runs with the invoking user's state dir. The
+      # payload is the root-owned staged path — never the gem directory.
       def systemd_unit
         home = user_home_for_service
         state_dir = ENV["YAMINE_STATE_DIR"] || File.join(home, ".yamine")
@@ -454,7 +524,7 @@ module Yamine
           After=network.target
 
           [Service]
-          ExecStart=#{RbConfig.ruby} #{ProxyControl.bin_path} proxy start --foreground --port #{ProxyControl::DEFAULT_TLS_PORT}
+          ExecStart=#{RbConfig.ruby} #{PrivilegedPayload.bin_path} proxy start --foreground --port #{ProxyControl::DEFAULT_TLS_PORT}
           Environment=YAMINE_STATE_DIR=#{state_dir}
           Environment=HOME=#{home}
 
@@ -466,8 +536,7 @@ module Yamine
       # Install + start the systemd unit (mirrors portless). We are root
       # here (sudo re-exec). The unit is written root-owned, then enabled
       # and started.
-      def install_systemd
-        unit_path = "/etc/systemd/system/yamine.service"
+      def install_systemd(unit_path = "/etc/systemd/system/yamine.service")
         File.write(unit_path, systemd_unit)
         File.chmod(0o644, unit_path)
         File.chown(0, 0, unit_path) if Process.uid.zero?
@@ -475,34 +544,61 @@ module Yamine
         Command.run("systemctl", "daemon-reload") or raise Error, "systemctl daemon-reload failed"
         Command.run("systemctl", "enable", "--now", "yamine") or raise Error, "systemctl enable failed"
         puts "Installed systemd service yamine on port 443."
+        puts "    Payload: #{PrivilegedPayload.bin_path} (root-owned, version-independent)."
       end
 
       def service_uninstall(ctx)
         if !ProxyControl.root?
-          puts "Removing system service (sudo required)..."
           state = Certs.state_dir
-          cmd = ["env", "YAMINE_STATE_DIR=#{state}",
-            RbConfig.ruby, ProxyControl.bin_path, "service", "uninstall", "--internal"]
-          return elevate(cmd)
+          if PrivilegedPayload.staged?
+            # The grant covers exactly this argv: the root-owned staged
+            # payload removing yamine's own files. Passwordless-capable.
+            puts "Removing system service (sudo required)..."
+            cmd = ["env", "YAMINE_STATE_DIR=#{state}",
+              RbConfig.ruby, PrivilegedPayload.bin_path, "service", "uninstall", "--internal"]
+            return elevate(cmd)
+          elsif !ctx.interactive?
+            $stderr.puts "No staged payload is installed, so uninstall needs an interactive sudo."
+            $stderr.puts "  Human: run in a terminal — sudo yamine service uninstall"
+            return false
+          else
+            # Legacy cleanup: no staged payload, but a legacy unit may
+            # still be installed. Human sudo only — no grant covers the
+            # gem path anymore.
+            puts "Removing system service (sudo required)..."
+            cmd = ["env", "YAMINE_STATE_DIR=#{state}",
+              RbConfig.ruby, ProxyControl.bin_path, "service", "uninstall", "--internal"]
+            return elevate(cmd, hint: :human)
+          end
         end
         case RUBY_PLATFORM
         when /darwin/
-          path = "/Library/LaunchDaemons/#{LAUNCHD_LABEL}.plist"
-          launchctl_bootout(path) if File.file?(path)
-          FileUtils.rm_f(path)
-          # Also clear any pre-rename service, so uninstall leaves no root
-          # proxy behind on a machine upgraded from an older yamine.
-          remove_legacy_launchd
-          puts "Removed root LaunchDaemon."
+          uninstall_launchd
         when /linux/
-          Command.run("systemctl", "disable", "--now", "yamine")
-          Command.run("systemctl", "daemon-reload")
-          FileUtils.rm_f("/etc/systemd/system/yamine.service")
-          puts "Removed systemd service yamine."
+          uninstall_systemd
         else
           raise Error, "Service uninstall not supported on #{RUBY_PLATFORM}"
         end
+        PrivilegedPayload.remove_payload!
+        puts "Removed staged payload (#{PrivilegedPayload.root_dir})."
         true
+      end
+
+      def uninstall_launchd(dir = "/Library/LaunchDaemons")
+        path = File.join(dir, "#{LAUNCHD_LABEL}.plist")
+        launchctl_bootout(path) if File.file?(path)
+        FileUtils.rm_f(path)
+        # Also clear any pre-rename service, so uninstall leaves no root
+        # proxy behind on a machine upgraded from an older yamine.
+        remove_legacy_launchd(dir)
+        puts "Removed root LaunchDaemon."
+      end
+
+      def uninstall_systemd(unit_path = "/etc/systemd/system/yamine.service")
+        Command.run("systemctl", "disable", "--now", "yamine")
+        Command.run("systemctl", "daemon-reload")
+        FileUtils.rm_f(unit_path)
+        puts "Removed systemd service yamine."
       end
 
       def service_status(ctx)
@@ -640,8 +736,13 @@ module Yamine
           # The root service install already synced under elevation; a
           # plain re-run must not fail rewriting /etc/hosts unprivileged
           # when the block is already in place.
-          unless Yamine::Hosts.synced?(hostnames) || Yamine::Hosts.sync(hostnames)
-            abort_setup("Could not write /etc/hosts.",
+          begin
+            unless Yamine::Hosts.synced?(hostnames) || Yamine::Hosts.sync(hostnames)
+              abort_setup("Could not write /etc/hosts.",
+                "Run `sudo yamine hosts sync`, then re-run `yamine setup`.")
+            end
+          rescue Error => e
+            abort_setup("Could not sync /etc/hosts: #{e.message}",
               "Run `sudo yamine hosts sync`, then re-run `yamine setup`.")
           end
         end
@@ -671,12 +772,15 @@ module Yamine
       end
 
       # The two ways to get a privileged proxy on 443: a human runs setup
-      # once (interactive sudo), or an agent/CI image is pre-provisioned
-      # with the scoped NOPASSWD rules from `yamine sudoers`.
+      # once (interactive sudo), or the machine already has the root
+      # service and agents keep its hosts entries fresh through the
+      # passwordless hosts-sync grant from `yamine sudoers`. Service
+      # install itself is never passwordless.
       def privileged_port_hint
         [
-          "Human: run this once — yamine setup",
-          "Agent/CI: pre-provision passwordless sudo once —",
+          "Human: run this once in a terminal — yamine setup (or: sudo yamine service install)",
+          "Agent/CI: the 443 service is installed by a human once per machine;",
+          "  steady-state hosts sync works via the grant instead —",
           "  yamine sudoers > /tmp/yamine.sudoers",
           "  sudo install -o root -g wheel -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine"
         ]
@@ -699,7 +803,8 @@ module Yamine
         port, tls = 443, true
         unless ctx.interactive?
           warn "    no TTY available for the sudo prompt."
-          warn "    Agent/CI: pre-provision passwordless sudo once —"
+          warn "    A human installs the 443 service once per machine (yamine setup in a terminal);"
+          warn "    steady-state hosts sync works via the grant instead:"
           warn "      yamine sudoers > /tmp/yamine.sudoers"
           warn "      sudo install -o root -g wheel -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine"
           return false
@@ -869,8 +974,12 @@ module Yamine
         # is the common case and must stay silent: warning there sent
         # people to a sudo write for a file that needed nothing.
         hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
-        unless hostnames.empty? || Yamine::Hosts.synced?(hostnames) || Hosts.sync(hostnames)
-          warn "Warning: could not write /etc/hosts (try sudo yamine hosts sync)."
+        begin
+          unless hostnames.empty? || Yamine::Hosts.synced?(hostnames) || Hosts.sync(hostnames)
+            warn "Warning: could not write /etc/hosts (try sudo yamine hosts sync)."
+          end
+        rescue Error => e
+          warn "Warning: #{e.message}"
         end
       end
       # yamine kamal <variant> [--app myapp] [--domain preview.example.com]

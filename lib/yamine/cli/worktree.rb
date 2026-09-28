@@ -668,7 +668,12 @@ module Yamine
       def resync_hosts(ctx)
         ctx.store.prune_stale
         hostnames = ctx.store.load_routes.map { |r| r["hostname"] }
-        return if Hosts.sync(hostnames)
+        begin
+          return if Hosts.sync(hostnames)
+        rescue Error => e
+          warn "Warning: #{e.message}"
+          return
+        end
 
         warn "Warning: could not update /etc/hosts (try sudo yamine hosts sync)."
       end

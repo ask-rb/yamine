@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+### Security
+
+- **The privileged service no longer runs user-writable code.** The
+  launchd/systemd unit used to execute the gem's `bin`+`lib` straight
+  out of the user's home (a version-stamped, user-writable gem
+  directory), so anything that could write those paths — a gem upgrade,
+  a `bundle install`, an agent editing the gem — ran as root at every
+  boot. `service install` now stages `bin`+`lib` into a root-owned
+  directory at a stable, version-independent path (`/Library/Application
+  Support/yamine` on macOS, `/usr/local/share/yamine` on Linux):
+  copied aside, ownership/modes locked, verified fail-closed (a bad
+  tree registers no unit and leaves the running daemon untouched), then
+  swung live with an atomic symlink swap plus a root-owned `VERSION`
+  marker. The unit pins only that path.
+- **The passwordless grant can no longer introduce root-executed
+  code.** `yamine sudoers` used to grant the version-stamped gem path
+  with `service install --internal` — effectively arbitrary code as
+  root for anyone who could write the gem, and stale after every
+  release. It now grants only the staged, version-independent payload:
+  `hosts sync` (the recurring agent need) and `service uninstall`
+  (which only deletes yamine's own files). Staging new root code stays
+  a human interactive sudo; a non-interactive `service install` fails
+  fast saying so. If your `/etc/sudoers.d/yamine` still pins a
+  version-stamped gem path, re-run `yamine sudoers` and replace it.
+- **`hosts sync` is strictly validated before anything is written.**
+  Route names are user-writable and the sync runs as root, so every
+  name must now be well-formed (no newline/breakout), written only
+  inside yamine's managed block, and under `.localhost` or a domain in
+  the root-owned staged allowlist. Anything else fails closed naming
+  the policy. Custom `proxy.host` domains need one human step: append
+  the parent domain to the staged `allowed-tlds` file.
+- **`yamine doctor` gains a `service` check.** It names a legacy unit
+  (payload in a user home or version-stamped gem path) with the exact
+  migration (`sudo yamine service install`), warns on staged-vs-CLI
+  version skew, fails on any root-executed path that is not root-owned
+  or is group/other-writable, and always reports the service
+  interpreter's path and writability. The legacy daemon keeps working
+  until the next elevated install.
+
+### Changed
+
+- `service install` (human, interactive, elevated) migrates a legacy
+  install in place and prints the interpreter caveat; `service
+  uninstall` removes the staged payload as well as the unit, scoped to
+  yamine's own files.
+- Non-interactive (`sudo -n`) failure messaging points at the new
+  provisioning story: humans install the 443 service once per machine,
+  agents keep hosts entries fresh through the grant.
+
+### Open caveat (not closed, stated plainly)
+
+- **The interpreter is still user-writable.** No root-owned Ruby ≥ 3.2
+  exists on a stock machine, so the daemon necessarily runs the
+  invoking (user-writable) Ruby. The payload is root-owned; the
+  interpreter is not. Doctor reports it truthfully and the README says
+  so. Fixed only by a root-owned Ruby new enough for the gem; yamine
+  will not vendor or stage an interpreter.
+
 ## [0.20.0] — 2026-09-28
 
 ### Added

@@ -54,21 +54,35 @@ to get back to 443.
 
 Binding 443 is privileged, so yamine installs a **root-owned launchd
 service** (macOS) or systemd unit (Linux) that binds 443 at boot — the
-same model as puma-dev and portless. Installing it needs sudo **once per
-machine**; after that, every `yamine` run in any project gets a clean
-`https://<app>.localhost` with no elevation and no prompt.
+same model as puma-dev and portless. Installing it needs an interactive
+sudo **once per machine** (one Touch ID tap); after that, every `yamine`
+run in any project gets a clean `https://<app>.localhost` with no
+elevation and no prompt.
 
-**Human (interactive):** run setup once — it trusts the CA, installs the
-service, syncs hosts, and verifies:
+**Human (interactive):** run setup once — it stages a root-owned copy of
+yamine, installs the service, trusts the CA, syncs hosts, and verifies:
 
 ```bash
 yamine setup
+# or, for just the service: sudo yamine service install
 ```
 
-**Agent / CI (no TTY):** the same commands fail fast with guidance,
-because sudo needs a terminal. To pre-provision a machine or image so
-agents can install the service without a prompt, install the scoped
-passwordless-sudo rules once (as an admin):
+The unit runs a **staged payload**, not your gem directory: the install
+copies yamine's `bin`+`lib` into a root-owned directory at a stable,
+version-independent path (`/Library/Application Support/yamine` on
+macOS, `/usr/local/share/yamine` on Linux), verifies root ownership and
+modes fail-closed (a bad tree registers nothing), and pins that path in
+the unit. Ordinary user-space writes — a gem upgrade, a `bundle
+install`, an agent editing the gem — can no longer change what runs as
+root, and upgrades never stale the setup. `yamine doctor` names a legacy
+install (a unit still pointing at a user-writable gem path) with the
+exact migration, plus staged-vs-CLI version skew and any ownership
+problem.
+
+**Agents: the steady-state grant.** New project ⇒ new hostname ⇒ Safari
+needs the `/etc/hosts` entry; that recurring privileged need stays
+agent-invocable without a prompt. Install the scoped passwordless-sudo
+rules once (as an admin):
 
 ```bash
 yamine sudoers > /tmp/yamine.sudoers
@@ -76,11 +90,41 @@ sudo install -o root -g wheel -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine  
 sudo install -o root -g root -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine   # Linux
 ```
 
-`yamine sudoers` prints rules scoped to yamine's own service
-re-exec — the gem's exact ruby + bin path with the `service install
---internal` / `service uninstall --internal` subcommands — never a bare
-interpreter. Re-run it after upgrading the gem if the install path
-changes. To undo: `sudo rm /etc/sudoers.d/yamine`.
+`yamine sudoers` prints rules for the **staged payload only** — `hosts
+sync` (hostnames strictly validated: well-formed, written only inside
+yamine's managed block, and only under `.localhost` or an allowlisted
+domain) and `service uninstall` (which only deletes yamine's own
+files). Installing or upgrading the staged payload moves user-writable
+source into root-owned paths, so it deliberately stays a human
+interactive sudo — no grant will ever cover it, and a non-interactive
+`service install` fails fast saying so. To undo the grant:
+`sudo rm /etc/sudoers.d/yamine`.
+
+If you installed an older yamine, your `/etc/sudoers.d/yamine` may still
+pin a version-stamped gem path (`.../gems/yamine-X.Y.Z/...`) including
+an install rule — re-run `yamine sudoers` and replace the file. The old
+rules go stale every release (which pushed people toward `NOPASSWD:
+ALL`); the new ones survive upgrades.
+
+**Custom domains** (e.g. `proxy.host: myapp.local.example.com` for OAuth
+parity) need their parent domain allowlisted once by a human — `hosts
+sync` refuses anything outside `.localhost` and the staged allowlist,
+because an unvalidated root hosts write could point a real vendor domain
+at loopback:
+
+```bash
+echo 'local.example.com' | sudo tee -a "/Library/Application Support/yamine/allowed-tlds"   # macOS
+echo 'local.example.com' | sudo tee -a /usr/local/share/yamine/allowed-tlds                 # Linux
+```
+
+**Open caveat: the interpreter.** The unit runs the invoking Ruby, and
+there is no root-owned Ruby ≥ 3.2 on a stock machine (`/usr/bin/ruby` is
+2.6), so the daemon necessarily runs a user-writable interpreter today.
+The payload is root-owned; the interpreter is not — `yamine doctor`
+reports its path and writability truthfully. Anything that can write
+that Ruby can change what runs as root. This hole stays open until the
+machine has a root-owned Ruby new enough for the gem; yamine will not
+vendor or stage an interpreter to pretend otherwise.
 
 ## The one-file model
 

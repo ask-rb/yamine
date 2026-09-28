@@ -42,19 +42,21 @@ class SudoersTest < Minitest::Test
       "service: myapp\nproxy:\n  tld: localhost\nprocesses:\n  web:\n    cmd: s\n    proxy: true\n")
   end
 
-  def test_sudoers_prints_scoped_nopasswd_rules_for_service_install
+  def test_sudoers_prints_scoped_nopasswd_rules_for_steady_state
     user = ENV.fetch("USER", Etc.getlogin)
     code, out, = run_cli("sudoers")
 
     assert_equal 0, code
     assert_includes out, "#{user} ALL=(root) NOPASSWD:"
-    assert_includes out, "service install --internal"
+    assert_includes out, "hosts sync"
     assert_includes out, "service uninstall --internal"
     assert_includes out, RbConfig.ruby
-    assert_includes out, Yamine::ProxyControl.bin_path
-    # The whole point: the grant is the gem's own re-exec, not a bare
-    # interpreter an attacker could point anywhere.
-    assert_includes out, "not a bare interpreter"
+    assert_includes out, Yamine::PrivilegedPayload.bin_path
+    # The whole point: the grant pins the root-owned staged payload,
+    # never the user-writable gem directory — and it can never stage
+    # new root-executed code, so install stays out.
+    refute_includes out, "service install"
+    refute_includes out, Yamine::ProxyControl.bin_path
   end
 
   def test_non_interactive_privileged_boot_points_at_sudoers
@@ -211,11 +213,11 @@ end
   end
 
   def test_linux_uninstall_disables_and_removes_unit
-    uninstall = source[/def service_uninstall(.*?)^      end/m, 1]
-    linux = uninstall[/when \/linux\/(.*?)^        else/m, 1]
+    uninstall = source[/def uninstall_systemd(.*?)^      end/m, 1]
 
-    assert_includes linux, '"systemctl", "disable", "--now", "yamine"'
-    assert_includes linux, 'rm_f("/etc/systemd/system/yamine.service")'
+    assert uninstall, "uninstall_systemd helper must exist"
+    assert_includes uninstall, '"systemctl", "disable", "--now", "yamine"'
+    assert_includes uninstall, "rm_f(unit_path)"
   end
 end
 
@@ -292,6 +294,12 @@ class ElevatePromptSafetyTest < Minitest::Test
   end
 
   def test_service_install_elevates_through_command_not_bare_sudo
+    # Staging root code is never passwordless: the interactive human
+    # path sudos once (plain sudo, one Touch ID tap) through the
+    # Command seam — never a bare sudo, and never `sudo -n` against a
+    # grant that no longer covers install.
+    ENV.delete("CI")
+    $stdin.stubs(:tty?).returns(true)
     Yamine::ProxyControl.stubs(:root?).returns(false)
     state = "/tmp/yamine-state"
     Yamine::Certs.stubs(:state_dir).returns(state)
@@ -299,7 +307,7 @@ class ElevatePromptSafetyTest < Minitest::Test
     bin = Yamine::ProxyControl.bin_path
 
     Yamine::Command.expects(:run)
-      .with("sudo", "-n", "env", "YAMINE_STATE_DIR=#{state}", ruby, bin,
+      .with("sudo", "env", "YAMINE_STATE_DIR=#{state}", ruby, bin,
         "service", "install", "--internal")
       .returns(true)
 

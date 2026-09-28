@@ -172,7 +172,7 @@ class ServiceLabelTest < Minitest::Test
   def test_remove_legacy_launchd_is_called_on_install_and_uninstall
     source = File.read(File.join(__dir__, "..", "lib", "yamine", "cli", "system.rb"))
     install = source[/def install_launchd(.*?)^      end/m, 1]
-    uninstall = source[/def service_uninstall(.*?)^      end/m, 1]
+    uninstall = source[/def uninstall_launchd(.*?)^      end/m, 1]
 
     assert_includes install, "remove_legacy_launchd"
     assert_includes uninstall, "remove_legacy_launchd"

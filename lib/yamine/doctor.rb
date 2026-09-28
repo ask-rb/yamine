@@ -35,6 +35,7 @@ module Yamine
       checks << check_ca
       checks << check_ca_bundle
       checks << check_serving_ca(port, tls: tls)
+      checks << check_service
       checks
     end
 
@@ -275,6 +276,71 @@ module Yamine
       end
     rescue StandardError
       0
+    end
+
+    # The privileged service: what runs as root on port 443.
+    #
+    # Three states. A legacy unit — payload inside a user home or a
+    # version-stamped gem directory — keeps working, so it warns (never
+    # fails) with the exact migration. A staged unit whose tree fails
+    # ownership verification FAILS: user-writable code running as root
+    # is the hole this check exists to close. Version skew between the
+    # staged payload and this CLI warns. The interpreter is always
+    # reported truthfully when a service exists: there is no root-owned
+    # Ruby new enough for the gem, so the daemon runs a user-writable
+    # interpreter and that residual risk stays visible.
+    def check_service
+      unless PrivilegedPayload.service_unit_present?
+        return Check.new(name: "service", ok: true,
+          message: "no privileged service installed — skipped")
+      end
+
+      ref = PrivilegedPayload.installed_payload_ref
+      if ref.nil?
+        return Check.new(name: "service", ok: true, warn: true,
+          message: "a privileged unit is installed but its payload path is unreadable" \
+            " — re-install it: sudo yamine service install")
+      end
+
+      if PrivilegedPayload.legacy_ref?(ref)
+        return Check.new(name: "service", ok: true, warn: true,
+          message: "the privileged service runs a user-writable legacy payload (#{ref}) — " \
+            "migrate it: sudo yamine service install")
+      end
+
+      problems = []
+      warnings = []
+      begin
+        PrivilegedPayload.verify!
+      rescue Error => e
+        problems << "#{e.message} — re-install it: sudo yamine service install"
+      end
+
+      staged = PrivilegedPayload.staged_version
+      if staged.nil?
+        warnings << "the service points at the staged payload but no staged version is recorded" \
+          " — re-install it: sudo yamine service install"
+      elsif staged != Yamine::VERSION
+        warnings << "the staged payload is v#{staged}, this CLI is v#{Yamine::VERSION}" \
+          " — re-install it: sudo yamine service install"
+      end
+
+      ruby = PrivilegedPayload.ruby_info
+      if ruby[:writable]
+        warnings << "the service interpreter #{ruby[:path]} is user-writable — " \
+          "anything that can write it changes what runs as root; only the payload above is root-owned " \
+          "(no root-owned Ruby >= 3.2 exists on this machine, so this residual risk stays until one does)"
+      end
+
+      if problems.empty? && warnings.empty?
+        Check.new(name: "service", ok: true,
+          message: "staged payload v#{staged} (#{PrivilegedPayload.bin_path})")
+      elsif problems.empty?
+        Check.new(name: "service", ok: true, warn: true, message: warnings.join("; "))
+      else
+        Check.new(name: "service", ok: false,
+          message: (problems + warnings).join("; "))
+      end
     end
 
     def print(checks, out: $stdout, json: false)

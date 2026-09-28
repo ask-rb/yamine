@@ -940,10 +940,11 @@ module Yamine
         privileged = port < 1024 && !ProxyControl.root?
         if privileged && !ctx.interactive?
           $stderr.puts "Error: proxy is not running and port #{port} needs root."
-          $stderr.puts "  Human: run this once — yamine setup"
-          $stderr.puts "  Agent/CI: pre-provision passwordless sudo once —"
-          $stderr.puts "    yamine sudoers > /tmp/yamine.sudoers"
-          $stderr.puts "    sudo install -o root -g wheel -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine"
+          $stderr.puts "  Human: run this once in a terminal — yamine setup (or: sudo yamine service install)"
+          $stderr.puts "  Agent/CI: the 443 service is installed by a human once per machine — it cannot be provisioned passwordlessly."
+          $stderr.puts "    Steady-state hosts sync works via the grant instead:"
+          $stderr.puts "      yamine sudoers > /tmp/yamine.sudoers"
+          $stderr.puts "      sudo install -o root -g wheel -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine"
           $stderr.puts "  Or start the proxy by hand: sudo yamine proxy start"
           exit 1
         end

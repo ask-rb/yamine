@@ -99,7 +99,7 @@ module Yamine
           yamine skills install           Install yamine skill into ~/.agents/skills/ (or --local)
           yamine proxy start|stop       Control the proxy
           yamine service install|status|uninstall   OS startup service
-          yamine sudoers                Print scoped passwordless-sudo rules for port 443
+          yamine sudoers                Print scoped passwordless-sudo rules for steady-state hosts sync
           yamine hosts sync|clean       Manage /etc/hosts entries
           yamine kamal <variant>        Preview-deploy snippet for Kamal
           yamine stop                   Stop this app's backend + routes

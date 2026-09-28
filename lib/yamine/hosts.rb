@@ -46,14 +46,14 @@ module Yamine
     # Bring the managed block to exactly these hostnames. Idempotent: when
     # the block already matches, this is a no-op returning true.
     #
-    # The sync short-circuit is load-bearing, not an optimization. /etc/hosts is
-    # root-owned on a normal machine, so a rewrite fails without sudo — and
-    # `setup` and every boot's workstation check run this. Without the
-    # guard, a machine whose hosts file was already correct got a
-    # "could not write /etc/hosts (try sudo yamine hosts sync)" warning on
-    # every run, sending people to an elevated write for a file that
-    # needed nothing.
-    def sync(hostnames, path = PATH)
+    # Every name is validated BEFORE anything is read or written — even
+    # on the already-synced path. routes.json is user-writable and this
+    # runs as root, so a crafted name (an embedded newline, a real
+    # vendor domain) would otherwise turn the sync into a domain-hijack
+    # primitive. Raises Yamine::Error instead of writing.
+    def sync(hostnames, path = PATH, tlds: nil)
+      tlds ||= default_scope_tlds
+      validate!(hostnames, tlds: tlds)
       return true if synced?(hostnames, path)
 
       content = read(path)
@@ -75,6 +75,74 @@ module Yamine
     # unprivileged when nothing changed.
     def synced?(hostnames, path = PATH)
       read(path).include?(managed_block(hostnames))
+    end
+
+    # Well-formed hostname only: labels of letters/digits/hyphens that
+    # neither start nor end with a hyphen, dots between them, 253 chars
+    # total. Anything else — whitespace, newlines, empty labels — is
+    # refused before it can reach the root-owned file.
+    def valid_hostname?(name)
+      host = name.to_s.downcase.sub(/\.\z/, "")
+      return false if host.empty? || host.length > 253
+
+      labels = host.split(".")
+      return false if labels.empty?
+
+      labels.all? do |label|
+        !label.empty? && label.length <= 63 &&
+          label.match?(/\A[a-z0-9]([a-z0-9-]*[a-z0-9])?\z/)
+      end
+    end
+
+    # In scope when the name IS an allowed dev TLD or sits under one.
+    # Suffix matching only: "evilgithub.com" is not "github.com", and
+    # "evil.github.com" is not "localhost".
+    def in_scope?(hostname, tlds)
+      host = hostname.to_s.downcase.sub(/\.\z/, "")
+      Array(tlds).map { |t| t.to_s.downcase }.any? do |tld|
+        !tld.empty? && (host == tld || host.end_with?(".#{tld}"))
+      end
+    end
+
+    # Fail closed on the first out-of-scope name: a partial managed
+    # block that silently drops a route would send people debugging
+    # DNS for a policy decision.
+    def validate!(hostnames, tlds:)
+      invalid = Array(hostnames).reject { |h| valid_hostname?(h) }
+      unless invalid.empty?
+        raise Error, "refusing hosts sync: invalid hostname(s): #{invalid.join(", ")}"
+      end
+
+      outside = Array(hostnames).reject { |h| in_scope?(h, tlds) }
+      unless outside.empty?
+        raise Error, "refusing hosts sync: #{outside.join(", ")} " \
+          "is outside the allowed dev TLDs (#{Array(tlds).join(", ")}). " \
+          "Keep names under .localhost, or have a human allow the parent domain."
+      end
+      true
+    end
+
+    # Which TLDs a sync may write under. *.localhost is always allowed
+    # (RFC 6761 reserves .localhost to loopback, so it can never hijack
+    # a real domain). Everything else comes from the root-owned
+    # allowlist when one is staged; before the first elevated install
+    # it falls back to the TLDs the proxy actually serves.
+    def default_scope_tlds(state_dir = Certs.state_dir)
+      tlds = ["localhost"]
+      staged = PrivilegedPayload.allowlist_file
+      if File.file?(staged)
+        tlds |= read_tld_list(staged)
+      else
+        tlds |= read_tld_list(File.join(state_dir, "proxy.tlds"))
+      end
+      tlds
+    end
+
+    def read_tld_list(path)
+      File.readlines(path).map { |l| l.strip.downcase }.reject(&:empty?)
+        .select { |t| Sanitize.valid_tld?(t) }.uniq
+    rescue SystemCallError
+      []
     end
 
     def clean(path = PATH)

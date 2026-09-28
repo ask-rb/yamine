@@ -40,6 +40,10 @@ class SetupCommandTest < Minitest::Test
 
   def stubbed_root_service_install
     Yamine::ProxyControl.stubs(:root?).returns(false)
+    # service install stages root code, so it only elevates for a
+    # human: pretend this run is interactive so the (stubbed) sudo
+    # succeeds instead of failing fast on the non-interactive path.
+    @ctx.stubs(:interactive?).returns(true)
     Yamine::Command.stubs(:run).returns(true)
     Yamine::ProxyControl.stubs(:ours?).returns(true)
     Yamine::Doctor.stubs(:run).returns([])
