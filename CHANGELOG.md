@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-09-28
+
 ### Security
 
 - **The privileged service no longer runs user-writable code.** The
