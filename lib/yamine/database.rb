@@ -4,6 +4,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "open3"
+require "time"
 
 module Yamine
   # Per-worktree databases. Every worktree directory gets its own database
