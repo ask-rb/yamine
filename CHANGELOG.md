@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-09-27
+
+### Added
+
+- **`yamine worktree info <name> [--json]`** — detailed view of a single
+  worktree: branch, HEAD (short SHA + subject), author, commit date,
+  dirty/merged status, and any database claims. `--json` emits the same
+  data as a machine-readable hash. Follows the same safety rails as
+  `list`: main checkout is always clean, detached HEADs report n/a for
+  merged status, and the path is resolved to its real location.
+
 ## [0.18.0] — 2026-09-23
 
 ### Changed
