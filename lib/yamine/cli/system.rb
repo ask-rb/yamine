@@ -30,7 +30,16 @@ module Yamine
       end
 
       def clean(ctx, _args)
-        ProxyControl.stop(ctx.store)
+        # A root service the CLI cannot signal keeps serving past stop:
+        # deleting the state dir (and untrusting the CA) then would
+        # orphan the live proxy and break its TLS. Refuse with the fix
+        # instead; the state on disk still describes the live proxy.
+        if ProxyControl.stop(ctx.store) == :needs_root
+          $stderr.puts "Cannot clean: the proxy runs as root (the launchd/systemd service) and is still serving."
+          $stderr.puts "  Restart it: sudo launchctl kickstart -k system/#{LAUNCHD_LABEL}"
+          $stderr.puts "  Or uninstall it: sudo yamine service uninstall — then re-run `yamine clean`."
+          exit 1
+        end
         result = Trust.untrust
         puts "CA removed from trust store." if result[:removed]
         warn "CA untrust failed: #{result[:error]}" if result[:error]
@@ -91,7 +100,33 @@ module Yamine
             Proxy.new(store: ctx.store, port: port, tls: tls,
               state_dir: ctx.store.dir, supervisor: sup, tlds: tlds).start_foreground
           else
-            ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, tlds: tlds)
+            # Privileged ports need root exactly like the boot path:
+            # spawn elevated when interactive (one sudo prompt),
+            # otherwise fail with the setup hint — never a doomed
+            # unprivileged child that dies of EACCES.
+            privileged = port < 1024 && !ProxyControl.root?
+            if privileged && !ctx.interactive?
+              $stderr.puts "Error: proxy is not running and port #{port} needs root."
+              $stderr.puts "  Human: run this once — yamine setup"
+              $stderr.puts "  Agent/CI: pre-provision passwordless sudo once —"
+              $stderr.puts "    yamine sudoers > /tmp/yamine.sudoers"
+              $stderr.puts "    sudo install -o root -g wheel -m 440 /tmp/yamine.sudoers /etc/sudoers.d/yamine"
+              $stderr.puts "  Or start the proxy by hand: sudo yamine proxy start"
+              exit 1
+            end
+            begin
+              ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls,
+                sudo: privileged, tlds: tlds)
+            rescue ProxyAlreadyRunningError => e
+              # Idempotent: the proxy we wanted is already serving, so
+              # report that instead of a false "started".
+              puts e.message
+              return
+            rescue ProxyNotRunningError => e
+              $stderr.puts "Error: #{e.message.lines.first&.strip}"
+              $stderr.puts "  Fix once: yamine setup"
+              exit 1
+            end
             puts "Proxy started on port #{port}#{tls ? " (HTTPS)" : " (HTTP)"}."
           end
         when "stop"
@@ -102,10 +137,12 @@ module Yamine
           when :unknown_process then puts "Port in use by an unknown process."
           when :needs_root
             # A root service keeps serving; say so rather than implying
-            # success. Uninstalling is the real answer — signalling it
-            # would just leave launchd's KeepAlive restarting it.
-            $stderr.puts "The proxy runs as root (the launchd/systemd service)."
-            $stderr.puts "  Uninstall it: sudo yamine service uninstall"
+            # success. Restarting picks up new state, uninstalling
+            # removes it — signalling the pid would just leave
+            # launchd's KeepAlive restarting it.
+            $stderr.puts "The proxy runs as root (the launchd/systemd service) and is still serving."
+            $stderr.puts "  Restart it: sudo launchctl kickstart -k system/#{LAUNCHD_LABEL}"
+            $stderr.puts "  Or uninstall it: sudo yamine service uninstall"
             exit 1
           end
         else
@@ -668,6 +705,10 @@ module Yamine
           return false
         end
         ProxyControl.spawn_daemon(store: ctx.store, port: port, tls: tls, sudo: true)
+        wait_for_ours(ctx, port, tls: tls)
+      rescue ProxyAlreadyRunningError
+        # The root service (or another daemon) already serves 443: that
+        # IS the privileged proxy setup wanted — verify and report.
         wait_for_ours(ctx, port, tls: tls)
       rescue Yamine::ProxyNotRunningError, SystemCallError => e
         warn "    daemon start failed: #{e.message.lines.first&.strip}"

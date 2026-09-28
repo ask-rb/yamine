@@ -243,3 +243,245 @@ class ProxyStopPermissionTest < Minitest::Test
     assert_nil Yamine::ProxyControl.proxy_port(@store)
   end
 end
+
+# spawn_daemon tells the truth: never spawn over a live proxy, never
+# record a dead pid, and surface the daemon's own log when it dies
+# (EACCES on 443, EADDRINUSE on a taken port) instead of a timeout.
+class SpawnGuardTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @store = Yamine::RouteStore.new(@dir)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir) rescue nil
+  end
+
+  # The incident: a root service answered the readiness probe while our
+  # child died of EACCES, and the dead pid was recorded over real state.
+  def test_does_not_spawn_when_proxy_already_serves
+    Yamine::ProxyControl.stubs(:ours?).returns(true)
+    Yamine::ProxyControl.expects(:spawn).never
+
+    error = assert_raises(Yamine::ProxyAlreadyRunningError) do
+      Yamine::ProxyControl.spawn_daemon(store: @store, port: 443, tls: true)
+    end
+    assert_match(/already serving on port 443/, error.message)
+    assert_nil Yamine::ProxyControl.read_pid(@store),
+      "nothing may be recorded when nothing was spawned"
+  end
+
+  def test_dead_child_raises_with_log_tail
+    Yamine::ProxyControl.stubs(:ours?).returns(false)
+    Yamine::ProxyControl.stubs(:spawn).returns(999_999)
+    Process.stubs(:detach)
+    Yamine::ProxyControl.stubs(:pid_alive?).returns(false)
+    File.write(File.join(@dir, "proxy.log"),
+      "bind failed: Address already in use (EADDRINUSE)\n")
+
+    error = assert_raises(Yamine::ProxyNotRunningError) do
+      Yamine::ProxyControl.spawn_daemon(store: @store, port: 443, tls: true)
+    end
+    assert_match(/exited before serving/, error.message)
+    assert_match(/EADDRINUSE/, error.message,
+      "the message must carry the log tail showing why the child died")
+    assert_nil Yamine::ProxyControl.read_pid(@store)
+  end
+
+  # The probe passes, but on another proxy's behalf: our child is dead
+  # (the pre-spawn check missed a service that started answering after
+  # we spawned). Its pid must never reach the state files.
+  def test_never_records_a_pid_that_is_not_alive
+    Yamine::ProxyControl.stubs(:ours?).returns(false, true)
+    Yamine::ProxyControl.stubs(:spawn).returns(999_999)
+    Process.stubs(:detach)
+    Yamine::ProxyControl.stubs(:pid_alive?).returns(false)
+
+    error = assert_raises(Yamine::ProxyNotRunningError) do
+      Yamine::ProxyControl.spawn_daemon(store: @store, port: 443, tls: true)
+    end
+    assert_match(/not recording/, error.message)
+    assert_nil Yamine::ProxyControl.read_pid(@store),
+      "a dead pid must never be written over live state"
+  end
+end
+
+# `stop` on a dead recorded pid must probe the recorded port first: a
+# root service the CLI cannot signal may still be serving it, and
+# clearing the state then orphans the live proxy.
+class StopDeadPidProbeTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @store = Yamine::RouteStore.new(@dir)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir) rescue nil
+  end
+
+  def test_dead_pid_with_serving_proxy_returns_needs_root_and_keeps_state
+    Yamine::ProxyControl.write_proxy_state(@store, pid: 42_424, port: 443, tls: true)
+    Yamine::ProxyControl.stubs(:pid_alive?).returns(false)
+    Yamine::ProxyControl.stubs(:ours?).with(443, tls: true).returns(true)
+
+    assert_equal :needs_root, Yamine::ProxyControl.stop(@store)
+    assert_equal 443, Yamine::ProxyControl.proxy_port(@store),
+      "state must survive a stop we could not perform"
+    assert_equal 42_424, Yamine::ProxyControl.read_pid(@store)
+  end
+
+  def test_dead_pid_with_nothing_serving_clears_stale
+    Yamine::ProxyControl.write_proxy_state(@store, pid: 42_424, port: 443, tls: true)
+    Yamine::ProxyControl.stubs(:pid_alive?).returns(false)
+    Yamine::ProxyControl.stubs(:ours?).with(443, tls: true).returns(false)
+
+    assert_equal :stale, Yamine::ProxyControl.stop(@store)
+    assert_nil Yamine::ProxyControl.proxy_port(@store)
+  end
+end
+
+# `clean` must refuse while a proxy it cannot stop is serving: deleting
+# the state dir (and untrusting the CA) then would orphan the live
+# proxy and break its TLS.
+class CleanRootProxyTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @store = Yamine::RouteStore.new(@dir)
+    @ctx = Yamine::CLI::Context.new
+    @ctx.stubs(:store).returns(@store)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir) rescue nil
+  end
+
+  def capture
+    out, err = StringIO.new, StringIO.new
+    orig_out, orig_err = $stdout, $stderr
+    $stdout, $stderr = out, err
+    code = begin
+      yield
+      0
+    rescue SystemExit => e
+      e.status
+    end
+    [code, out.string, err.string]
+  ensure
+    $stdout, $stderr = orig_out, orig_err
+  end
+
+  def test_clean_refuses_while_root_proxy_serves
+    Yamine::ProxyControl.write_proxy_state(@store, pid: 42_424, port: 443, tls: true)
+    Yamine::ProxyControl.stubs(:stop).returns(:needs_root)
+    Yamine::Trust.expects(:untrust).never
+    Yamine::Hosts.expects(:clean).never
+
+    code, _out, err = capture { Yamine::CLI::SystemCommand.clean(@ctx, []) }
+
+    assert_equal 1, code
+    assert_match(%r{kickstart -k system/dev\.yamine}, err)
+    assert_match(/service uninstall/, err)
+    assert Dir.exist?(@dir), "state must survive a clean that refused"
+    assert_equal 443, Yamine::ProxyControl.proxy_port(@store)
+  end
+
+  def test_clean_proceeds_after_a_real_stop
+    Yamine::ProxyControl.stubs(:stop).returns(:stopped)
+    Yamine::Trust.stubs(:untrust).returns({ removed: false })
+    Yamine::Hosts.stubs(:clean)
+
+    code, out, = capture { Yamine::CLI::SystemCommand.clean(@ctx, []) }
+
+    assert_equal 0, code
+    assert_match(/Cleaned yamine state/, out)
+    refute Dir.exist?(@dir)
+  end
+end
+
+# A bare `proxy start` on a privileged port behaves like the boot path:
+# elevate when interactive, fail with the setup hint when not — never a
+# doomed unprivileged child, never a false "started".
+class ProxyStartPrivilegeTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @store = Yamine::RouteStore.new(@dir)
+    @ctx = Yamine::CLI::Context.new
+    @ctx.stubs(:store).returns(@store)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir) rescue nil
+  end
+
+  def capture
+    out, err = StringIO.new, StringIO.new
+    orig_out, orig_err = $stdout, $stderr
+    $stdout, $stderr = out, err
+    code = begin
+      yield
+      0
+    rescue SystemExit => e
+      e.status
+    end
+    [code, out.string, err.string]
+  ensure
+    $stdout, $stderr = orig_out, orig_err
+  end
+
+  def test_privileged_start_without_tty_fails_with_setup_hint_and_spawns_nothing
+    Yamine::ProxyControl.stubs(:root?).returns(false)
+    @ctx.stubs(:interactive?).returns(false)
+    Yamine::ProxyControl.expects(:spawn_daemon).never
+
+    code, _out, err = capture do
+      Yamine::CLI::SystemCommand.proxy(@ctx, ["start", "-p", "443"])
+    end
+
+    assert_equal 1, code
+    assert_match(/needs root/, err)
+    assert_match(/yamine setup/, err)
+    assert_nil Yamine::ProxyControl.read_pid(@store)
+  end
+
+  def test_privileged_start_with_tty_elevates_like_boot
+    Yamine::ProxyControl.stubs(:root?).returns(false)
+    @ctx.stubs(:interactive?).returns(true)
+    spawned = nil
+    Yamine::ProxyControl.stubs(:spawn_daemon)
+      .with { |**kw| spawned = kw; true }.returns(1234)
+
+    code, out, = capture do
+      Yamine::CLI::SystemCommand.proxy(@ctx, ["start", "-p", "443"])
+    end
+
+    assert_equal 0, code
+    assert_equal true, spawned[:sudo], "privileged ports elevate, like the boot path"
+    assert_match(/Proxy started on port 443/, out)
+  end
+
+  def test_already_serving_is_reported_not_claimed
+    Yamine::ProxyControl.stubs(:spawn_daemon).raises(
+      Yamine::ProxyAlreadyRunningError,
+      "A yamine proxy is already serving on port 8443 — not starting another.")
+
+    code, out, = capture do
+      Yamine::CLI::SystemCommand.proxy(@ctx, ["start", "-p", "8443"])
+    end
+
+    assert_equal 0, code
+    assert_match(/already serving on port 8443/, out)
+    refute_match(/Proxy started/, out)
+  end
+
+  def test_failed_spawn_points_at_setup
+    Yamine::ProxyControl.stubs(:spawn_daemon).raises(
+      Yamine::ProxyNotRunningError, "Proxy did not start on port 8443.")
+
+    code, _out, err = capture do
+      Yamine::CLI::SystemCommand.proxy(@ctx, ["start", "-p", "8443"])
+    end
+
+    assert_equal 1, code
+    assert_match(/yamine setup/, err)
+  end
+end

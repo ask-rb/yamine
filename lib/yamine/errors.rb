@@ -33,5 +33,9 @@ module Yamine
     end
   end
   class ProxyNotRunningError < Error; end
+  # spawn_daemon raises this instead of spawning when our proxy already
+  # answers on the port: the readiness probe would otherwise pass on the
+  # live proxy's behalf and a dead pid would be recorded over real state.
+  class ProxyAlreadyRunningError < Error; end
   class CertError < Error; end
 end

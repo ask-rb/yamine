@@ -247,6 +247,13 @@ module Yamine
     # explicitly because sudo does not preserve the environment.
     # Returns pid.
     def spawn_daemon(store:, port:, tls:, sudo: false, tlds: nil)
+      # Never spawn over a live proxy: the readiness probe below would
+      # pass on ITS behalf while our child dies of EACCES, and the dead
+      # pid would then be recorded over the real proxy's state.
+      if ours?(port, tls: tls)
+        raise ProxyAlreadyRunningError,
+          "A yamine proxy is already serving on port #{port} — not starting another."
+      end
       store.ensure_dir
       log_path = File.join(store.dir, LOG_NAME)
       Log.rotate(log_path)
@@ -261,6 +268,14 @@ module Yamine
       Process.detach(pid)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 15
       until ours?(port, tls: tls)
+        # The child died before serving (EACCES on a privileged port,
+        # EADDRINUSE on a taken one): fail now with its log instead of
+        # waiting out the deadline and blaming a timeout.
+        unless pid_alive?(pid)
+          raise ProxyNotRunningError,
+            "Proxy exited before serving on port #{port}. " \
+            "Log (#{log_path}):\n#{log_tail(log_path)}"
+        end
         if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
           raise ProxyNotRunningError,
             "Proxy did not start on port #{port}. " \
@@ -268,6 +283,15 @@ module Yamine
         end
 
         sleep 0.25
+      end
+      # The probe can pass on someone else's behalf (a root service that
+      # started answering between our pre-spawn check and now, while our
+      # child died): never record a pid that is not alive.
+      unless pid_alive?(pid)
+        raise ProxyNotRunningError,
+          "Proxy process #{pid} is not running, but port #{port} answers. " \
+          "Another proxy (likely the root service) is serving it — not recording #{pid}. " \
+          "Log (#{log_path}):\n#{log_tail(log_path)}"
       end
       write_proxy_state(store, pid: pid, port: port, tls: tls)
       pid
@@ -296,6 +320,13 @@ module Yamine
         return :unknown_process
       end
       unless pid_alive?(pid)
+        # The recorded process is gone, but someone may still be serving
+        # the recorded port (a root service the CLI cannot signal):
+        # clearing the state then would orphan the live proxy, leaving
+        # nothing on disk to find or stop it by. Probe first.
+        if port && ours?(port, tls: proxy_tls(store))
+          return :needs_root
+        end
         clear_pid(store)
         return :stale
       end
