@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS trusts the local CA now, instead of merely filing it.** A
+  non-elevated `yamine trust` added the certificate without naming any
+  policies, so macOS recorded a trust-store entry with no settings at
+  all: the CA sat in the login keychain trusted for nothing, and every
+  browser answered `ERR_CERT_AUTHORITY_INVALID` on every
+  `https://*.localhost` route. The add now passes `-p ssl -p basic` —
+  the same thing Keychain Access writes for Secure Sockets Layer + X.509
+  Basic — and `yamine trust` re-reads the trust store afterwards rather
+  than believing the exit status, so an add that recorded nothing is a
+  failure that names the exact `security add-trusted-cert` to run
+  instead of a success the browser will contradict.
+- **A CA that is in the keychain but untrusted repairs itself.** The
+  check that decided whether to trust compared fingerprints alone, so
+  once that bare certificate was in a keychain every later boot
+  concluded it was trusted and never touched it again — the check that
+  should have caught the broken state was the one hiding it. It now
+  needs both halves: the certificate in a keychain *and* a trust
+  setting recorded for its fingerprint. A machine left with a
+  policy-less entry therefore self-heals on the next `yamine trust` or
+  proxy boot, and one whose trust store cannot be read is left alone
+  rather than re-adding on every boot.
+- **A proxy running as a normal user trusts the CA too.** Trust used to
+  be attempted only when the proxy was root, so a first run without
+  `sudo` never tried and installed a CA that could not work. Every proxy
+  now ensures trust, elevated or not, and reports a failed attempt
+  rather than swallowing it. `YAMINE_SKIP_CA_TRUST` is the escape
+  hatch for machines whose CA arrives by MDM or a hand-run
+  `security add-trusted-cert`.
+- **`yamine doctor` names a CA the OS does not trust.** The recorded
+  marker says yamine trusted this certificate; it says nothing about
+  whether macOS agreed. `doctor` asks the OS too, so a CA that is
+  installed but untrusted — the state where every route fails TLS —
+  reads as "CA is installed but macOS does not trust it" and points at
+  `yamine trust` instead of passing as healthy.
+
 ## [0.22.0] - 2026-09-29
 
 ### Added
