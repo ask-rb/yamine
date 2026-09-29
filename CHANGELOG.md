@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-09-29
+
 ### Fixed
 
 - **macOS trusts the local CA now, instead of merely filing it.** A
@@ -38,7 +40,6 @@
   installed but untrusted — the state where every route fails TLS —
   reads as "CA is installed but macOS does not trust it" and points at
   `yamine trust` instead of passing as healthy.
-
 ## [0.22.0] - 2026-09-29
 
 ### Added
