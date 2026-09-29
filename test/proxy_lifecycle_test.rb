@@ -6,9 +6,17 @@ class ProxyControlTest < Minitest::Test
   def setup
     @state = Dir.mktmpdir
     @store = Yamine::RouteStore.new(@state)
+    # The tests below spawn the REAL yamine binary as a child, and every
+    # proxy now ensures CA trust at boot. A spawned proxy that reaches
+    # `security add-trusted-cert` would write into the developer's own
+    # login keychain, once per test, with a CA that exists only in a
+    # throwaway state dir. The suite must never do that.
+    @skip_trust = ENV["YAMINE_SKIP_CA_TRUST"]
+    ENV["YAMINE_SKIP_CA_TRUST"] = "1"
   end
 
   def teardown
+    ENV["YAMINE_SKIP_CA_TRUST"] = @skip_trust
     FileUtils.remove_entry(@state)
   end
 

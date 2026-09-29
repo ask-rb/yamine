@@ -145,6 +145,252 @@ class TrustTest < Minitest::Test
   end
 end
 
+# A CA in the keychain is not a CA macOS trusts, and neither is one the
+# trust store holds with no trust SETTING — that bare entry is exactly
+# what `add-trusted-cert -r trustRoot` leaves behind without `-p`
+# (`security dump-trust-settings` counts it as zero settings). A check
+# that compared fingerprints alone therefore reported the broken state
+# as "trusted" on every later boot, and the machine stayed broken across
+# a proxy restart and a gem upgrade.
+#
+# Hermetic: the trust store is stubbed, never exported from the real one.
+class MacosCaTrustTest < Minitest::Test
+  KEYCHAIN = "/tmp/yamine-test.keychain-db"
+
+  def setup
+    @dir = Dir.mktmpdir
+    @ca = Yamine::Certs.ensure_ca(@dir)
+    @fp = Yamine::Trust.fingerprint_of(@ca[:cert])
+    Yamine::Trust.stubs(:login_keychain).returns(KEYCHAIN)
+    Process.stubs(:uid).returns(501)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir) rescue nil
+  end
+
+  # THE REGRESSION. The CA is in the keychain and the trust store holds a
+  # bare entry for it — the state this bug left behind on a real machine.
+  def test_present_but_untrusted_ca_is_not_trusted
+    stub_keychain(@fp)
+    stub_trust_store(@fp => "")
+
+    refute Yamine::Trust.already_trusted?(@ca[:cert], KEYCHAIN),
+      "a CA the trust store records no trust setting for is not trusted"
+  end
+
+  # A CA that is not in any keychain cannot be used either: macOS builds
+  # the chain by searching keychains for the issuer. Measured on the
+  # machine this bug was found on, whose CA had a trust-list entry and
+  # no keychain copy at all: "unable to get local issuer certificate".
+  def test_trusted_but_absent_from_the_keychain_is_not_trusted
+    Yamine::Trust.stubs(:keychain_fingerprints).returns([])
+    stub_trust_store(@fp => ssl_policies)
+
+    refute Yamine::Trust.already_trusted?(@ca[:cert], KEYCHAIN),
+      "a trust setting for a certificate no keychain holds cannot anchor a chain"
+  end
+
+  def test_ca_with_a_recorded_trust_setting_is_trusted
+    stub_keychain(@fp)
+    stub_trust_store(@fp => ssl_policies)
+
+    assert Yamine::Trust.already_trusted?(@ca[:cert], KEYCHAIN),
+      "sslServer + basicX509 settings mean macOS treats this as a root"
+  end
+
+  # -r deny records kSecTrustSettingsResult 3 and no policies: the user
+  # asked for exactly the state we are repairing.
+  def test_explicitly_distrusted_ca_is_not_trusted
+    stub_keychain(@fp)
+    stub_trust_store(@fp => deny_result)
+
+    refute Yamine::Trust.already_trusted?(@ca[:cert], KEYCHAIN)
+  end
+
+  # A trust store that cannot be read must not turn every boot into a
+  # re-add: a re-add in the user domain can raise a GUI authorization
+  # prompt, which is worse than the bug being fixed.
+  def test_unreadable_trust_store_does_not_look_untrusted
+    stub_keychain(@fp)
+    Yamine::Trust.stubs(:trust_settings).returns(nil)
+
+    assert Yamine::Trust.already_trusted?(@ca[:cert], KEYCHAIN),
+      "cannot read the trust store => leave it alone, do not re-add every boot"
+  end
+
+  # The non-admin invocation. Without the policies the trust store
+  # records nothing usable, which is the whole bug.
+  def test_non_admin_add_names_the_trust_policies
+    seen = []
+    record_add(seen)
+    Yamine::Trust.stubs(:already_trusted?).returns(false, true)
+
+    Yamine::Trust.trust_macos(@ca[:cert])
+
+    assert_equal ["security", "add-trusted-cert", "-r", "trustRoot", "-p", "ssl",
+      "-p", "basic", "-k", KEYCHAIN, @ca[:cert]], seen,
+      "a user-domain add must name the SSL and basic policies, and must not use -d"
+  end
+
+  def test_admin_add_keeps_the_admin_domain
+    Process.stubs(:uid).returns(0)
+    seen = []
+    record_add(seen)
+    Yamine::Trust.stubs(:already_trusted?).returns(false, true)
+
+    Yamine::Trust.trust_macos(@ca[:cert])
+
+    assert_includes seen, "-d", "an elevated add must stay in the admin domain"
+    assert_includes seen, "/Library/Keychains/System.keychain"
+    assert_includes seen, "-p", "the elevated add must name its policies too"
+  end
+
+  # The state this bug was found in: the certificate is already in the
+  # keychain, untrusted. The old code returned early on the fingerprint
+  # match and never recorded a trust setting at all.
+  def test_already_present_but_untrusted_ca_gets_the_corrective_add
+    stub_keychain(@fp)
+    # What the corrective add does to the store: the bare entry gains the
+    # policies. The second read (after the add) sees that.
+    Yamine::Trust.stubs(:trust_settings)
+      .returns(exported(@fp => ""), exported(@fp => ssl_policies))
+    seen = []
+    record_add(seen)
+
+    Yamine::Trust.trust_macos(@ca[:cert])
+
+    refute_empty seen, "an untrusted CA that is already in the keychain must still be re-added"
+    assert_includes seen, "-p"
+  end
+
+  # A trusted CA must not be re-added: adding a certificate twice is how
+  # the trust store filled up with duplicates.
+  def test_trusted_ca_is_not_re_added
+    stub_keychain(@fp)
+    stub_trust_store(@fp => ssl_policies)
+    seen = []
+    record_add(seen)
+
+    Yamine::Trust.trust_macos(@ca[:cert])
+
+    assert_empty seen, "an already-trusted CA must not be added again"
+  end
+
+  # `security add-trusted-cert` exits 0 for a certificate it merely
+  # filed. Believing that exit code is what wrote a success marker for a
+  # CA no browser would accept, so the trust store is re-read and a
+  # failure names the command the user has to run.
+  def test_add_that_records_no_trust_setting_is_reported
+    stub_keychain(@fp)
+    stub_trust_store(@fp => "")
+    Yamine::Command.stubs(:capture2).returns(["", ok_status])
+
+    error = assert_raises(Yamine::CertError) { Yamine::Trust.trust_macos(@ca[:cert]) }
+
+    assert_includes error.message, "security add-trusted-cert",
+      "the failure must name the command that fixes it"
+    assert_includes error.message, "-p ssl", "and the policies that make it work"
+  end
+
+  # The state-dir marker says "we trusted this", not "macOS trusts
+  # this". Trusting the marker alone is how the broken state was cached
+  # and never repaired.
+  def test_marker_alone_does_not_make_the_ca_trusted
+    Yamine::Certs.mark_trusted(@dir)
+    stub_keychain(@fp)
+    stub_trust_store(@fp => "")
+
+    refute Yamine::Trust.trusted?(@dir),
+      "a marker over an untrusted CA must not short-circuit a re-trust"
+  end
+
+  def test_marker_plus_a_trust_setting_is_trusted
+    Yamine::Certs.mark_trusted(@dir)
+    stub_keychain(@fp)
+    stub_trust_store(@fp => ssl_policies)
+
+    assert Yamine::Trust.trusted?(@dir)
+  end
+
+  # A CA trusted into the System keychain by an elevated install is
+  # trusted for the unprivileged proxy that serves it, so the check has
+  # to look at both keychains rather than only the caller's.
+  def test_trusted_in_the_system_keychain_counts
+    Yamine::Certs.mark_trusted(@dir)
+    system = "/Library/Keychains/System.keychain"
+    Yamine::Trust.stubs(:keychain_fingerprints).with(KEYCHAIN, common_name: nil).returns([])
+    Yamine::Trust.stubs(:keychain_fingerprints).with(system, common_name: nil).returns([@fp])
+    Yamine::Trust.stubs(:trust_settings).with(KEYCHAIN).returns(exported({}))
+    Yamine::Trust.stubs(:trust_settings).with(system).returns(exported(@fp => ssl_policies))
+
+    assert Yamine::Trust.trusted?(@dir)
+  end
+
+  # The admin domain is a different store: reading only the user's own
+  # settings would leave a root install looking untrusted forever.
+  def test_system_keychain_is_read_from_the_admin_domain
+    seen = []
+    Yamine::Command.stubs(:capture2)
+      .with { |*args| seen.replace(args) if args[1] == "trust-settings-export"; true }
+      .returns(["", ok_status])
+
+    Yamine::Trust.trust_settings("/Library/Keychains/System.keychain")
+
+    assert_equal "trust-settings-export", seen[1]
+    assert_includes seen, "-d", "the System keychain's settings live in the admin domain"
+  end
+
+  private
+
+  def ok_status
+    Struct.new(:success?).new(true)
+  end
+
+  # The certificate is in the keychain: `find-certificate` finds it.
+  def stub_keychain(fingerprints)
+    Yamine::Trust.stubs(:keychain_fingerprints).returns(fingerprints)
+  end
+
+  # The trust store, as `security trust-settings-export` writes it: keyed
+  # by SHA-1 fingerprint, each entry holding only what the OS recorded.
+  def stub_trust_store(entries)
+    Yamine::Trust.stubs(:trust_settings).returns(exported(entries))
+  end
+
+  def record_add(seen)
+    Yamine::Command.stubs(:capture2)
+      .with { |*args| seen.replace(args) if args[1] == "add-trusted-cert"; true }
+      .returns(["", ok_status])
+  end
+
+  def exported(entries)
+    body = entries.map do |fp, settings|
+      "\t<key>#{fp}</key>\n\t<dict>\n\t\t<key>issuerName</key>\n\t\t<data>MBQxEjAQBgNVBAMMCVlhbWluZSBDQQ==\n\t\t</data>\n" \
+        "#{settings}\t</dict>\n"
+    end.join
+    %(<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n) \
+      "\t<key>trustList</key>\n\t<dict>\n#{body}\t</dict>\n</dict>\n</plist>\n"
+  end
+
+  # What `-p ssl -p basic` records: policy OIDs, no explicit result, which
+  # SecTrustSettings.h defines as kSecTrustSettingsResultTrustRoot.
+  def ssl_policies
+    "\t\t<key>trustSettings</key>\n\t\t<array>\n" \
+      "\t\t\t<dict>\n\t\t\t\t<key>kSecTrustSettingsPolicy</key>\n\t\t\t\t<data>KgYIhnY2QAE=</data>\n" \
+      "\t\t\t\t<key>kSecTrustSettingsPolicyName</key>\n\t\t\t\t<string>sslServer</string>\n\t\t\t</dict>\n" \
+      "\t\t\t<dict>\n\t\t\t\t<key>kSecTrustSettingsPolicy</key>\n\t\t\t\t<data>KgYIhnY2QAg==</data>\n" \
+      "\t\t\t\t<key>kSecTrustSettingsPolicyName</key>\n\t\t\t\t<string>basicX509</string>\n\t\t\t</dict>\n" \
+      "\t\t</array>\n"
+  end
+
+  def deny_result
+    "\t\t<key>trustSettings</key>\n\t\t<array>\n\t\t\t<dict>\n" \
+      "\t\t\t\t<key>kSecTrustSettingsResult</key>\n\t\t\t\t<integer>3</integer>\n" \
+      "\t\t\t</dict>\n\t\t</array>\n"
+  end
+end
+
 # The service identity was an ask-local leftover ("dev.ask.local"), and a
 # label is how launchctl addresses a service — so installing the renamed
 # service while the old plist is still loaded would leave TWO root
@@ -235,6 +481,11 @@ class CaFreshnessOrderingTest < Minitest::Test
   def test_current_ca_reports_trusted_without_extra_work
     Yamine::Certs.ensure_ca(@dir)
     Yamine::Certs.mark_trusted(@dir)
+    # ca_current_and_trusted? asks the OS as well as the marker now, and
+    # a test CA is in no trust store. Stubbed so the suite stays hermetic;
+    # the marker and the fresh-CA half of the check are still the ones
+    # under test here (see MacosCaTrustTest for the OS half).
+    Yamine::Trust.stubs(:already_trusted?).returns(true)
 
     assert Yamine::CLI::SystemCommand.ca_current_and_trusted?(@dir)
   end
@@ -310,6 +561,10 @@ class StaleCaReportingTest < Minitest::Test
     # and the stale-CA warning under test never runs.
     Yamine::Certs.stubs(:state_dir).returns(dir)
     Yamine::Doctor.stubs(:stale_ca_count).returns(2)
+    # check_ca now asks the OS trust store as well as the marker, and a
+    # test CA is in no trust store. Stubbed to keep the suite hermetic;
+    # this test is about the stale-CA warning, which is what it asserts.
+    Yamine::Trust.stubs(:already_trusted?).returns(true)
 
     check = Yamine::Doctor.check_ca
 
@@ -318,5 +573,99 @@ class StaleCaReportingTest < Minitest::Test
     assert_match(/yamine trust/, check.message, "must name the command that clears it")
   ensure
     FileUtils.remove_entry(dir) if dir && File.directory?(dir)
+  end
+
+  # Doctor reported "CA trusted" off the state-dir marker while macOS
+  # held no trust setting for the CA every browser was being asked to
+  # accept. The marker records what WE did, not what the OS recorded.
+  def test_reports_a_ca_the_marker_calls_trusted_but_macos_does_not
+    dir = Dir.mktmpdir
+    Yamine::Certs.ensure_ca(dir)
+    Yamine::Certs.mark_trusted(dir)
+    Yamine::Certs.stubs(:state_dir).returns(dir)
+    Yamine::Doctor.stubs(:stale_ca_count).returns(0)
+    Yamine::Trust.stubs(:already_trusted?).returns(false)
+
+    check = Yamine::Doctor.check_ca
+
+    refute check.ok, "a CA macOS does not trust must not be reported as ok"
+    assert_match(/macOS does not trust/, check.message)
+    assert_match(/yamine trust/, check.message, "must name the command that fixes it")
+  ensure
+    FileUtils.remove_entry(dir) if dir && File.directory?(dir)
+  end
+end
+
+# A proxy running as an ordinary user is the process the browser's TLS
+# stack actually talks to, and it skipped CA trust entirely
+# (`ensure_system_ca_trust if Process.uid.zero?`). So a first run as a
+# normal user installed a CA that could not work, and nothing at any
+# point said so. A failure to trust has to be reported, not swallowed:
+# the user is the only one who can authorize it.
+class NonElevatedProxyTrustTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @errors = []
+    @proxy = Yamine::Proxy.new(store: Yamine::RouteStore.new(@dir), port: 0, tls: false,
+      state_dir: @dir, on_error: ->(m) { @errors << m })
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir) rescue nil
+  end
+
+  def test_proxy_ensures_ca_trust_without_elevation
+    source = File.read(File.join(__dir__, "..", "lib", "yamine", "proxy.rb"))
+    boot = source[/def start_foreground.*?^      trap\("INT"\)/m]
+
+    refute_nil boot, "could not locate the boot path in proxy.rb"
+    assert_includes boot, "ensure_ca_trust",
+      "every proxy must ensure CA trust, elevated or not"
+    refute_includes boot, "Process.uid.zero?",
+      "a non-elevated proxy that skips trust is how a CA gets installed unusable"
+  end
+
+  def test_proxy_attempts_trust_when_the_ca_is_not_trusted
+    Yamine::Trust.stubs(:trusted?).returns(false)
+    Yamine::Trust.expects(:trust).with(@dir).returns({ trusted: true })
+
+    @proxy.send(:ensure_ca_trust)
+
+    assert_empty @errors
+  end
+
+  # A locked keychain or a declined authorization prompt must reach the
+  # user, with the reason, rather than being logged into nothing.
+  def test_proxy_reports_a_failed_trust_attempt
+    Yamine::Trust.stubs(:trusted?).returns(false)
+    Yamine::Trust.stubs(:trust).with(@dir)
+      .returns({ trusted: false, error: "no trust setting was recorded" })
+
+    @proxy.send(:ensure_ca_trust)
+
+    assert_equal 1, @errors.length, "a failed trust attempt must not be silent"
+    assert_includes @errors.first, "no trust setting was recorded"
+  end
+
+  def test_proxy_does_not_re_trust_a_ca_macos_already_trusts
+    Yamine::Trust.stubs(:trusted?).returns(true)
+    Yamine::Trust.expects(:trust).never
+
+    @proxy.send(:ensure_ca_trust)
+  end
+
+  # A machine whose CA arrives by MDM profile or a hand-run
+  # `security add-trusted-cert` must not have it overwritten at every
+  # proxy boot — and the suite spawns real proxies, so it must be able to
+  # keep the trust store out of reach entirely.
+  def test_proxy_leaves_the_trust_store_alone_when_told_to
+    orig = ENV["YAMINE_SKIP_CA_TRUST"]
+    ENV["YAMINE_SKIP_CA_TRUST"] = "1"
+    Yamine::Trust.expects(:trusted?).never
+    Yamine::Trust.expects(:trust).never
+
+    @proxy.send(:ensure_ca_trust)
+  ensure
+    ENV["YAMINE_SKIP_CA_TRUST"] = orig
   end
 end

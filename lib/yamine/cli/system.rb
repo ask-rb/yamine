@@ -517,15 +517,15 @@ module Yamine
       # expiring, or renamed.
       #
       # The ordering is the whole point, so it lives in one place rather
-      # than at each call site. `trusted?` compares a marker against the
-      # fingerprint of the certificate ON DISK, and a proxy regenerates
-      # the CA at boot when the name changes. Checking the marker before
-      # the CA is current therefore reads a stale match, skips trust, and
-      # lets the proxy come up serving a CA the keychain does not trust —
-      # breaking TLS for every route.
+      # than at each call site. The state-dir marker is only half of it
+      # (`Trust.trusted?` also asks the OS): a marker that says "we
+      # trusted this" survives a keychain that never took the setting,
+      # so checking it before the CA is current — or on its own — reads
+      # a stale match, skips trust, and lets the proxy come up serving a
+      # CA no browser trusts.
       def ca_current_and_trusted?(dir = Certs.state_dir)
         Certs.ensure_ca(dir)
-        Certs.trusted?(dir)
+        Trust.trusted?(dir)
       end
 
       # Root-only CA trust: the System keychain (all users, no prompt).

@@ -192,6 +192,15 @@ module Yamine
       unless Certs.trusted?(dir)
         return Check.new(name: "ca", ok: false, message: "CA not trusted — run: yamine trust")
       end
+      # The marker says WE trusted this certificate; it says nothing about
+      # whether the OS recorded a trust setting for it. A CA sitting in
+      # the keychain with no trust setting is the state that produced
+      # ERR_CERT_AUTHORITY_INVALID on every route, with the marker
+      # cheerfully reporting success.
+      unless Trust.trusted?(dir)
+        return Check.new(name: "ca", ok: false,
+          message: "CA is installed but macOS does not trust it — run: yamine trust")
+      end
 
       # Trusted CAs that are not the one now on disk. They accumulate from
       # CA regeneration (missing, expiring, or renamed — the ask-local

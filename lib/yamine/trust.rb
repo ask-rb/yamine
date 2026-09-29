@@ -1,10 +1,41 @@
 # frozen_string_literal: true
 
 require "open3"
+require "tmpdir"
 
 module Yamine
   # Install the local CA into the OS trust store.
   module Trust
+    SYSTEM_KEYCHAIN = "/Library/Keychains/System.keychain"
+
+    # The policies a browser's TLS stack evaluates a leaf under: SSL
+    # server (the hostname check) and X.509 basic (the chain build).
+    #
+    # They have to be named, and this is measured, not assumed.
+    # `add-trusted-cert -r trustRoot` with no `-p` exits 0 and records
+    # the certificate in the trust store with NO `trustSettings` array at
+    # all: `security dump-trust-settings` reports "Number of trust
+    # settings : 0", and `security trust-settings-export` shows a
+    # trustList entry holding only issuerName/modDate/serialNumber. What
+    # the CA is trusted FOR is then unstated, and whether such an entry
+    # is honoured at all depends on the certificate also being installed
+    # in a keychain the evaluator searches — on the machine this was
+    # fixed on, it was not, and every browser answered
+    # ERR_CERT_AUTHORITY_INVALID.
+    #
+    # With `-p ssl -p basic` the same call records
+    # kSecTrustSettingsPolicyName sslServer + basicX509, and per
+    # SecTrustSettings.h a settings entry with no explicit
+    # kSecTrustSettingsResult defaults to kSecTrustSettingsResultTrustRoot
+    # ("trust this root cert"). That is also what Keychain Access writes
+    # for a certificate set to Secure Sockets Layer + X.509 Basic.
+    MACOS_TRUST_POLICIES = %w[-p ssl -p basic].freeze
+
+    # SecTrustSettingsResult (Security/SecTrustSettings.h). Only these
+    # two grant trust; 3 is Deny and 4 is Unspecified, so a CA whose only
+    # setting is one of those is explicitly NOT trusted.
+    TRUST_RESULTS = [1, 2].freeze
+
     module_function
 
     def platform
@@ -29,6 +60,33 @@ module Yamine
       { trusted: true }
     rescue StandardError => e
       { trusted: false, error: e.message }
+    end
+
+    # True when the OS trust store will honour the CA in `dir`.
+    #
+    # The state-dir marker is only half the answer, and the half that
+    # lies: it records that WE trusted this exact certificate at some
+    # point, so it survives a keychain that never took the setting, a
+    # trust run that recorded nothing, and a CA that was regenerated
+    # under it. Treating the marker as "trusted" is how a machine kept a
+    # CA in its keychain that no browser would accept.
+    def trusted?(dir = Certs.state_dir)
+      return false unless Certs.trusted?(dir)
+      return true unless platform == :macos
+
+      paths = Certs.ca_paths(dir)
+      return false unless File.file?(paths[:cert])
+
+      macos_keychains.any? { |keychain| already_trusted?(paths[:cert], keychain) }
+    end
+
+    # The keychains a CA can be trusted into: the user's own, and — for
+    # an elevated run — the System one, which every user on the machine
+    # reads. Both are checked because the certificate on disk may have
+    # been trusted into either, and a CA trusted only as root is not
+    # trusted for a later unprivileged run (or the reverse).
+    def macos_keychains
+      [login_keychain, SYSTEM_KEYCHAIN].uniq
     end
 
     # The fingerprint `security -Z` prints: uppercase hex, no colons.
@@ -81,7 +139,7 @@ module Yamine
     end
 
     def keychains
-      [login_keychain, "/Library/Keychains/System.keychain"]
+      [login_keychain, SYSTEM_KEYCHAIN]
     end
 
     # Remove trusted certificates that carry one of our CA names but are
@@ -206,25 +264,142 @@ module Yamine
         return if already_trusted?(cert_path, keychain)
 
         _out, status = Command.capture2("security", "add-trusted-cert",
-          "-d", "-r", "trustRoot", "-k", keychain, cert_path)
-        raise CertError, "security add-trusted-cert (system) failed" unless status.success?
+          "-d", "-r", "trustRoot", *MACOS_TRUST_POLICIES, "-k", keychain, cert_path)
+        raise CertError, macos_trust_error(cert_path, keychain) unless status.success?
       else
+        # Not elevated: the user's own keychain, with the trust policies
+        # named. The certificate still has to be in a keychain — macOS
+        # builds the chain by searching keychains for the issuer, so a
+        # trust setting for a certificate that is not installed anywhere
+        # is dead weight. Measured: CA trusted but absent from every
+        # keychain => "unable to get local issuer certificate".
         keychain = login_keychain
         return if already_trusted?(cert_path, keychain)
 
         _out, status = Command.capture2("security", "add-trusted-cert",
-          "-r", "trustRoot", "-k", keychain, cert_path)
-        raise CertError, "security add-trusted-cert failed" unless status.success?
+          "-r", "trustRoot", *MACOS_TRUST_POLICIES, "-k", keychain, cert_path)
+        raise CertError, macos_trust_error(cert_path, keychain) unless status.success?
       end
+
+      # `add-trusted-cert` exits 0 for a certificate it merely filed —
+      # which is exactly what the policy-less invocation did on every
+      # non-elevated install. The exit status is not evidence of trust,
+      # only the trust store is: re-read it here, or the state-dir marker
+      # records a success no browser will ever agree with.
+      return if already_trusted?(cert_path, keychain)
+
+      raise CertError, macos_trust_error(cert_path, keychain)
     end
 
-    # Adding the same certificate twice is not harmless: it is how the
-    # trust store accumulated duplicates across repeated setup runs.
+    def macos_trust_error(cert_path, keychain)
+      domain = (keychain == "/Library/Keychains/System.keychain") ? ["-d"] : []
+      command = (["security", "add-trusted-cert", *domain, "-r", "trustRoot",
+        *MACOS_TRUST_POLICIES, "-k", keychain, cert_path]).join(" ")
+      "macOS recorded no trust setting for the CA in #{keychain}. " \
+        "Writing user trust settings needs authorization, which a detached " \
+        "or headless run cannot grant — run this in a terminal, then retry: " \
+        "#{command}"
+    end
+
+    # True when macOS will actually honour this certificate as a CA.
+    #
+    # BOTH halves are required, and the second one is the one that used
+    # to be missing:
+    #
+    #   1. the certificate is in the keychain, so the trust evaluator can
+    #      find the issuer when it builds the chain; and
+    #   2. the trust store records a trust SETTING for its fingerprint.
+    #
+    # Presence alone is not trust: a certificate in a keychain with no
+    # trust setting fails with CSSMERR_TP_NOT_TRUSTED. Neither is a bare
+    # trust-list entry — the key with no `trustSettings` array that
+    # `add-trusted-cert` without `-p` leaves behind, which
+    # `security dump-trust-settings` counts as zero settings. Requiring
+    # a real setting costs one corrective add on a machine that has the
+    # bare kind (the add upgrades it in place, without duplicating the
+    # certificate) and nothing thereafter, so the stricter reading
+    # converges rather than looping.
+    #
+    # The fingerprint comparison stays: adding a certificate twice is not
+    # harmless, and it is how the trust store filled up with duplicates.
+    # It is now a necessary condition rather than the whole answer.
     def already_trusted?(cert_path, keychain)
       fp = fingerprint_of(cert_path)
       return false unless fp
+      return false unless keychain_fingerprints(keychain, common_name: nil).include?(fp)
 
-      keychain_fingerprints(keychain, common_name: nil).include?(fp)
+      trust_setting?(fp, keychain)
+    end
+
+    # The trust settings the OS records, as plist XML, or nil when macOS
+    # cannot be asked at all.
+    #
+    # The trust store is keyed by the certificate's SHA-1 fingerprint —
+    # the same identity `security -Z` prints — so this never has to match
+    # on a common name, which every yamine CA shares.
+    #
+    # `security trust-settings-export` is the only `security` subcommand
+    # that reports the SETTING rather than the presence:
+    # `dump-trust-settings` lists certificates and a count of their
+    # settings, `find-certificate` lists certificates. The admin domain
+    # needs `-d`; without it only the user's own settings are exported,
+    # so a root install would look untrusted forever.
+    #
+    # The certificate's own key is looked up by the caller, so a store
+    # that holds no entry for it comes back as XML WITHOUT it — that is a
+    # definite answer (never trusted), not an unreadable one.
+    def trust_settings(keychain)
+      file = File.join(Dir.tmpdir, "yamine-trust-#{Process.pid}-#{rand(1 << 32)}.plist")
+      _out, status = Command.capture2("security", "trust-settings-export",
+        *("-d" if keychain == SYSTEM_KEYCHAIN), file)
+      return nil unless status.success?
+
+      # Read back through plutil rather than parsing the plist here: it
+      # is Apple's own reader, and it keeps this file free of a plist
+      # parser (rexml is a bundled gem, unavailable under bundler).
+      xml, converted = Command.capture2("plutil", "-convert", "xml1", "-o", "-", file)
+      converted.success? ? xml : nil
+    rescue SystemCallError
+      nil
+    ensure
+      File.unlink(file) if file && File.file?(file)
+    end
+
+    # True when the trust store records a trust SETTING that grants
+    # trust for this certificate.
+    #
+    # Returns TRUE when the trust store cannot be read. That direction
+    # is deliberate: a check that always answers "not trusted" turns
+    # every boot into a re-add, and a re-add in the user domain can
+    # raise a GUI authorization prompt — a worse failure than the one
+    # this fixes.
+    def trust_setting?(fingerprint, keychain)
+      settings = trust_settings(keychain)
+      return true if settings.nil?
+
+      entry = plist_dict_after(settings, fingerprint)
+      return false unless entry&.include?("<key>trustSettings</key>")
+
+      granted = entry.scan(%r{<key>kSecTrustSettingsResult</key>\s*<integer>(\d+)</integer>}).flatten
+      return true if granted.empty? # policies only: defaults to trustRoot
+
+      granted.any? { |result| TRUST_RESULTS.include?(result.to_i) }
+    end
+
+    # The `<dict>` that follows `key`, nested dicts included. A
+    # trustSettings array is a list of dicts, so a lazy `.*?</dict>`
+    # would stop in the middle of the very array being read.
+    def plist_dict_after(xml, key)
+      at = xml.index("<key>#{key}</key>")
+      return nil unless at
+
+      rest = xml[(at + 1)..]
+      depth = 0
+      rest.scan(/<dict>|<\/dict>/) do
+        depth += ($~[0] == "<dict>" ? 1 : -1)
+        return rest[0...$~.end(0)] if depth.zero?
+      end
+      nil
     end
 
     def login_keychain

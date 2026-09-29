@@ -82,6 +82,10 @@ class StartCommandTest < Minitest::Test
 
   def test_setup_reached_via_noninteractive_proxy_error_points_at_setup
     Yamine::Certs.stubs(:trusted?).returns(true)
+    # The CA half of ensure_workstation! now asks the trust store as well
+    # as the marker. Stubbed so the suite cannot reach `security
+    # add-trusted-cert`; this test is about the proxy error path.
+    Yamine::Trust.stubs(:already_trusted?).returns(true)
     Yamine::ProxyControl.stubs(:listening?).returns(false)
     Yamine::CLI::Context.any_instance.stubs(:interactive?).returns(false)
     ctx = Yamine::CLI::Context.new
@@ -98,6 +102,10 @@ class StartCommandTest < Minitest::Test
   def test_ensure_workstation_uses_configured_port_not_443
     ENV["YAMINE_PORT"] = "8443"
     Yamine::Certs.stubs(:trusted?).returns(true)
+    # The CA step now asks the trust store as well as the marker; a test
+    # CA is in none, so without this the workstation setup would really
+    # run `security add-trusted-cert`. These tests are about the port.
+    Yamine::Trust.stubs(:already_trusted?).returns(true)
     Yamine::ProxyControl.stubs(:listening?).returns(false)
     Yamine::ProxyControl.stubs(:ours?).returns(false)
     Yamine::ProxyControl.stubs(:root?).returns(false)
@@ -123,6 +131,10 @@ class StartCommandTest < Minitest::Test
   def test_ensure_workstation_still_requires_setup_for_default_port
     ENV.delete("YAMINE_PORT")
     Yamine::Certs.stubs(:trusted?).returns(true)
+    # The CA step now asks the trust store as well as the marker; a test
+    # CA is in none, so without this the workstation setup would really
+    # run `security add-trusted-cert`. These tests are about the port.
+    Yamine::Trust.stubs(:already_trusted?).returns(true)
     Yamine::ProxyControl.stubs(:listening?).returns(false)
     Yamine::ProxyControl.stubs(:ours?).returns(false)
     Yamine::ProxyControl.stubs(:root?).returns(false)

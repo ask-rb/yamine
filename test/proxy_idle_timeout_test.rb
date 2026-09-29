@@ -196,6 +196,11 @@ class ProxyAcceptorSurvivalTest < Minitest::Test
     errors = []
     proxy = Yamine::Proxy.new(store: store, port: 0, tls: false,
       idle_timeout: 0.3, on_error: ->(m) { errors << m })
+    # Every proxy now ensures CA trust at boot, whatever it runs as, and
+    # an untrusted CA really is re-added. This test's CA is in no trust
+    # store, so stub the attempt: unstubbed, the suite would shell out to
+    # `security add-trusted-cert` and mutate the developer's keychain.
+    Yamine::Trust.stubs(:trusted?).returns(true)
     real = TCPServer.new("127.0.0.1", 0)
     proxy.stubs(:build_servers).returns([FlakyServer.new(real)])
 

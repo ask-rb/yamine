@@ -107,7 +107,7 @@ module Yamine
       servers.each { |s| s.listen(@port) }
       @port = servers.first.addr[1]
       Ownership.chown_state_dir(@store.dir)
-      ensure_system_ca_trust if Process.uid.zero?
+      ensure_ca_trust
       trap("INT") { stop(servers) }
       trap("TERM") do
         @supervisor&.shutdown
@@ -188,14 +188,30 @@ module Yamine
 
     private
 
-    # A root proxy (launchd service or sudo daemon) is the one process
-    # that can trust the CA into the System keychain silently — no GUI
-    # popup. Idempotent: the state-dir marker makes repeat boots a no-op.
-    def ensure_system_ca_trust
-      return if Certs.trusted?(@state_dir)
+    # The proxy is the process the browser's TLS stack actually talks to,
+    # so it is where the CA has to be trusted — as root, into the System
+    # keychain silently, and as a normal user, into the login keychain.
+    # A non-elevated proxy used to skip this entirely, which is how a
+    # first run as an ordinary user installed a CA that could not work.
+    #
+    # `Trust.trusted?` asks the trust store, not just the state-dir
+    # marker, so a CA that is present but untrusted is repaired instead
+    # of being short-circuited. Trust.trust only writes the marker once
+    # the trust setting is confirmed, so a failure is retried (and
+    # reported) on the next boot rather than cached as a success.
+    #
+    # YAMINE_SKIP_CA_TRUST is for machines whose CA arrives some other
+    # way — an MDM profile, a hand-run `security add-trusted-cert` — and
+    # for the suite, which spawns real proxies and must never reach a real
+    # keychain.
+    def ensure_ca_trust
+      return if ENV["YAMINE_SKIP_CA_TRUST"]
+      return if Trust.trusted?(@state_dir)
 
       result = Trust.trust(@state_dir)
-      @on_error.call("CA trust warning: #{result[:error]}") unless result[:trusted]
+      return if result[:trusted]
+
+      @on_error.call("CA trust warning: #{result[:error]}")
     end
 
     def admit?
