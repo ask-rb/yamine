@@ -20,9 +20,15 @@ class ProxyIdleTimeoutTest < Minitest::Test
     FileUtils.remove_entry(dir) if dir
   end
 
+  # Both clocks get a short bound. They used to be one clock: the head
+  # read rode IDLE_TIMEOUT. Now it rides its own (HEAD_TIMEOUT, 60s in
+  # production), so a proxy that only shortens idle_timeout would wait the
+  # full production head bound on a backend that goes quiet before its
+  # first byte — and the tests below, which are all about not waiting,
+  # would hang for a minute.
   def proxy_for(store, **opts)
     Yamine::Proxy.new(store: store, port: 0, tls: false,
-      idle_timeout: IDLE, **opts)
+      idle_timeout: IDLE, head_timeout: IDLE, **opts)
   end
 
   # One accepted connection driven through Proxy#handle, like the

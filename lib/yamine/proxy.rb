@@ -17,6 +17,11 @@ module Yamine
   class Proxy
     HOPS_HEADER = "x-yamine-hops"
     HEALTH_HEADER = "x-yamine"
+    # Failure class on a 502 (backend-refused / backend-silent), so an
+    # agent can branch on what went wrong without parsing the page. Same
+    # split of labour as HEALTH_HEADER: a browser shows the human the body,
+    # an agent reads the header.
+    ERROR_HEADER = "x-yamine-error"
     MAX_HOPS = 5
     MAX_HEAD_BYTES = 64 * 1024
     MAX_HOSTNAME_BYTES = 253
@@ -36,6 +41,28 @@ module Yamine
     # Raised when a peer is silent past the idle bound. An IOError so the
     # existing rescue-and-close paths treat it like any dead peer.
     IdleTimeout = Class.new(IOError)
+    # Head bound: how long a backend gets to send the response *head*
+    # after the request is fully forwarded. Split from IDLE_TIMEOUT
+    # because the two answer different questions, and answering them with
+    # one clock is what made a dead backend and a slow one look identical.
+    #
+    # IDLE_TIMEOUT caps silence between *body* bytes, so it has to stay
+    # generous: a long-lived streaming response (an SSE chat backend)
+    # commits its head at once and then goes quiet for unbounded stretches
+    # with no heartbeat, and any clock that bounds its life is wrong. The
+    # head is the backend's first chance to say anything at all, and until
+    # it does the client has nothing to stream — a font that hangs 60s and
+    # then 502s tells neither a human nor an agent why.
+    #
+    # Defaults to the same 60s the head read already got (it used to ride
+    # IDLE_TIMEOUT's default), so splitting the clocks cannot turn a
+    # request that works today into a failure.
+    HEAD_TIMEOUT = Float(ENV.fetch("YAMINE_PROXY_HEAD_TIMEOUT", "60"))
+    # Raised when a response head runs out its own budget. A distinct class
+    # because the two timeouts mean different things: HeadTimeout is the
+    # one backend failure where the app is provably up and merely slow,
+    # which is also the only one a retry can be safe for.
+    HeadTimeout = Class.new(IdleTimeout)
     CHUNK_BYTES = 16_384
     # Route cache: routes.json is the source of truth, but re-reading
     # and re-parsing it on every request is wasteful under HMR polling.
@@ -47,7 +74,8 @@ module Yamine
     LoopDetected = Struct.new(:host, :hops)
 
     def initialize(store:, port: 443, tls: true, state_dir: nil, on_error: nil,
-      supervisor: nil, max_connections: MAX_CONNECTIONS, idle_timeout: IDLE_TIMEOUT, tlds: nil)
+      supervisor: nil, max_connections: MAX_CONNECTIONS, idle_timeout: IDLE_TIMEOUT,
+      head_timeout: HEAD_TIMEOUT, tlds: nil)
       @store = store
       @port = port
       @tls = tls
@@ -56,6 +84,7 @@ module Yamine
       @supervisor = supervisor
       @max_connections = max_connections
       @idle_timeout = idle_timeout
+      @head_timeout = head_timeout
       @tlds = Array(tlds).flatten.compact.map(&:downcase)
       @tlds = [Hostname::DEFAULT_TLD] if @tlds.empty?
       @inflight = 0
@@ -228,6 +257,12 @@ module Yamine
     # responses with Content-Length allow the loop to continue.
     def handle(sock)
       tls_handshake(sock)
+      # The 502 below names the app, so it needs the route it was serving
+      # and the host that asked for it. A connection can fail before
+      # either exists (a client that connects and stalls), so both start
+      # out empty and the page degrades instead of naming a wrong app.
+      entry = nil
+      host = ""
       buf = +""
       loop do
         head, buf = read_head(sock, buf)
@@ -256,42 +291,87 @@ module Yamine
         # Supervised managed apps may be stopped (idle/crashed/restarted):
         # boot on request, then serve.
         if @supervisor && entry["kind"] == "socket" && entry["spec"]
-          entry = @supervisor.ensure_running(entry)
-          unless entry
-            render_bad_gateway(sock)
+          booted = @supervisor.ensure_running(entry)
+          unless booted
+            render_bad_gateway(sock, entry, host, :refused)
             break
           end
+          entry = booted
         end
         @supervisor&.touch(entry["hostname"])
 
         headers[HOPS_HEADER] = (headers[HOPS_HEADER].to_i + 1).to_s
         set_forwarded(headers, sock, tls: @tls)
 
-        begin
-          backend = dial(entry)
-        rescue SystemCallError => e
-          @on_error.call("dial failed for #{host}: #{e.message}")
-          render_bad_gateway(sock)
-          break
+        keep, reason = forward(sock, entry, method, target, headers, buf)
+        # One retry, and only where retrying cannot duplicate work. A
+        # backend that was merely slow answers the second attempt; a POST
+        # that arrived twice is worse than a slow page, so a bodiless
+        # request is the only one that gets another chance.
+        if reason && retriable?(reason, method, headers)
+          @on_error.call("retrying #{method} #{host} after #{reason}")
+          keep, reason = forward(sock, entry, method, target, headers, buf)
         end
 
-        keep = pipe_request(sock, backend, method, target, headers, buf)
-        unless keep == :keep_alive
-          backend.close rescue nil
+        if reason
+          render_bad_gateway(sock, entry, host, reason)
           break
         end
-        backend.close rescue nil
+        break unless keep == :keep_alive
       end
     rescue SystemCallError, OpenSSL::SSL::SSLError, IOError => e
       @on_error.call("Proxy error: #{e.message}")
-      render_bad_gateway(sock) rescue nil
+      render_bad_gateway(sock, entry, host, :gone) rescue nil
     ensure
       sock.close rescue nil
     end
 
+    # One attempt at the backend: dial, forward the request, relay the
+    # response. Returns [keep_alive?, reason], where reason is nil on
+    # success and otherwise names which backend failure this was. That one
+    # value decides both whether a retry is safe and what the 502 says, so
+    # "refused" and "silent" can never drift apart again.
+    #
+    # The backend socket is always closed here: it is never reused (only
+    # the client connection is), so a failed attempt has nothing to keep
+    # alive either.
+    def forward(sock, entry, method, target, headers, buf)
+      begin
+        backend = dial(entry)
+      rescue SystemCallError => e
+        @on_error.call("dial failed for #{entry["hostname"]}: #{e.message}")
+        return [:close, :refused]
+      end
+
+      begin
+        pipe_request(sock, backend, method, target, headers, buf)
+      rescue HeadTimeout
+        [:close, :silent]
+      rescue EOFError
+        [:close, :gone]
+      ensure
+        backend.close rescue nil
+      end
+    end
+
+    # A refused dial never reached the app, so any method replays safely —
+    # the request body is still unread on the client socket. A head
+    # timeout means the head DID reach the app, so the only safe replays
+    # are the bodiless methods: the body has already been consumed off the
+    # client socket and cannot be faithfully resent, and a duplicated
+    # message is a worse outcome than a slow page.
+    def retriable?(reason, method, headers)
+      return true if reason == :refused
+      return false unless reason == :silent
+      return false unless %w[GET HEAD OPTIONS].include?(method.to_s.upcase)
+
+      request_body_length(headers) == 0
+    end
+
     # Forward one request (body framed by Content-Length), then relay
-    # the response. Returns :keep_alive when both sides want to reuse
-    # the connection and the response length was known.
+    # the response. Returns [keep_alive?, reason]: :keep_alive when both
+    # sides want to reuse the connection and the response length was
+    # known, and a reason when the backend failed to answer instead.
     def pipe_request(sock, backend, method, target, headers, buf)
       write_all(backend, rebuild_head(method, target, headers))
 
@@ -301,7 +381,7 @@ module Yamine
         write_all(backend, buf) unless buf.empty?
         copy_stream(sock, backend)
         relay_response_close(backend, sock)
-        return :close
+        return [:close, nil]
       end
 
       remaining = body_len
@@ -313,11 +393,9 @@ module Yamine
       end
       copy_stream(sock, backend, remaining) if remaining > 0
 
-      rhead, rbuf = read_head(backend, +"")
-      if rhead.nil?
-        render_bad_gateway(sock)
-        return :close
-      end
+      rhead, rbuf = read_response_head(backend)
+      return [:close, :gone] if rhead.nil?
+
       _rm, _rt, rheaders = parse_head(rhead)
       write_all(sock, rhead)
       write_all(sock, rbuf) unless rbuf.empty?
@@ -326,7 +404,7 @@ module Yamine
       if rlen.nil?
         # No Content-Length: close-delimited response.
         copy_stream(backend, sock)
-        return :close
+        return [:close, nil]
       end
       remaining = rlen - rbuf.bytesize
       copy_stream(backend, sock, remaining) if remaining > 0
@@ -334,14 +412,14 @@ module Yamine
       if keep_alive?(headers) && keep_alive?(rheaders)
         # Any bytes beyond Content-Length on the backend are a second
         # pipelined response on a connection we won't reuse — drop.
-        :keep_alive
+        [:keep_alive, nil]
       else
-        :close
+        [:close, nil]
       end
     end
 
     def relay_response_close(backend, sock)
-      rhead, rbuf = read_head(backend, +"")
+      rhead, rbuf = read_response_head(backend)
       return if rhead.nil?
 
       write_all(sock, rhead)
@@ -407,17 +485,39 @@ module Yamine
     # (pipelined requests) across calls. Returns [head, buf]. The wait
     # for more bytes is idle-bounded: a peer that sends nothing is
     # dropped (nil) instead of pinning the thread.
-    def read_head(sock, buf)
+    #
+    # A caller may pass its own budget (`timeout:`), which is the only way
+    # a timeout escapes as HeadTimeout instead of being flattened into the
+    # same [nil, ...] a dead peer returns — see read_response_head for why
+    # that distinction is the whole point.
+    def read_head(sock, buf, timeout: nil)
       loop do
         if (idx = buf.index("\r\n\r\n"))
           return [buf.byteslice(0, idx + 4), buf.byteslice(idx + 4..) || +""]
         end
         return [nil, buf] if buf.bytesize > MAX_HEAD_BYTES
 
-        buf << read_chunk(sock, CHUNK_BYTES)
+        buf << read_chunk(sock, CHUNK_BYTES, timeout: timeout)
       end
+    rescue IdleTimeout => e
+      # A caller that brought its own budget needs to be told a read timed
+      # out; everyone else keeps the old contract, where a peer that goes
+      # quiet is just another [nil, ...].
+      raise HeadTimeout, e.message, e.backtrace if timeout
+
+      [nil, +""]
     rescue EOFError, IOError
       [nil, +""]
+    end
+
+    # The response head is read on its own budget, and is the one read
+    # where a timeout is allowed out of read_head: until the head arrives
+    # the client has no response at all, so "how long do we wait" is a
+    # real question with a tunable answer — and the answer is also what
+    # makes a retry safe. Once the head is in, the body is on the idle
+    # clock, which stays generous for a streaming response.
+    def read_response_head(sock)
+      read_head(sock, +"", timeout: @head_timeout)
     end
 
     # Finish a deferred TLS handshake under the idle bound. A no-op for
@@ -439,13 +539,13 @@ module Yamine
     # blocks in the kernel without a select deadline, so no stalled peer
     # pins the thread — including mid-TLS-handshake stalls, which plain
     # readpartial would ride out forever.
-    def read_chunk(sock, size)
+    def read_chunk(sock, size, timeout: nil)
       loop do
         result = sock.read_nonblock(size, exception: false)
         return result if result.is_a?(String)
         raise EOFError, "end of file reached" if result.nil?
 
-        wait_for(sock, result)
+        wait_for(sock, result, timeout)
       end
     end
 
@@ -490,29 +590,34 @@ module Yamine
     end
 
     # Block until the socket is ready for the direction a nonblocking op
-    # asked for; IdleTimeout when the bound passes with no progress.
-    def wait_for(sock, wait_kind)
+    # asked for; a timeout when the bound passes with no progress. A
+    # caller-supplied bound only changes how long we wait — what a timeout
+    # *means* is read_head's call, because only it knows whether it was
+    # waiting on a client, on a body, or on a backend's first word.
+    def wait_for(sock, wait_kind, timeout = nil)
+      bound = timeout || @idle_timeout
       if wait_kind == :wait_readable
-        raise IdleTimeout, "idle timeout after #{@idle_timeout}s with no bytes" unless readable?(sock)
-      elsif !writable?(sock)
-        raise IdleTimeout, "idle timeout after #{@idle_timeout}s with no bytes"
+        raise IdleTimeout, "no bytes within #{bound}s" unless readable?(sock, bound)
+      elsif !writable?(sock, bound)
+        raise IdleTimeout, "no bytes within #{bound}s"
       end
       nil
     end
 
-    # select(2) with the idle bound. SSL-buffered bytes count as
-    # readable without a syscall. A closed socket raises in select —
-    # report not-ready and let the nonblocking op raise the real error.
-    def readable?(sock)
+    # select(2) with the caller's bound (the idle one by default). SSL-
+    # buffered bytes count as readable without a syscall. A closed socket
+    # raises in select — report not-ready and let the nonblocking op
+    # raise the real error.
+    def readable?(sock, timeout = @idle_timeout)
       return true if sock.respond_to?(:pending) && sock.pending.positive?
 
-      !IO.select([sock], nil, nil, @idle_timeout).nil?
+      !IO.select([sock], nil, nil, timeout).nil?
     rescue IOError, SystemCallError
       false
     end
 
-    def writable?(sock)
-      !IO.select(nil, [sock], nil, @idle_timeout).nil?
+    def writable?(sock, timeout = @idle_timeout)
+      !IO.select(nil, [sock], nil, nil, timeout).nil?
     rescue IOError, SystemCallError
       false
     end
@@ -652,10 +757,72 @@ module Yamine
       respond(sock, 503, body)
     end
 
-    def render_bad_gateway(sock)
-      respond(sock, 502, "<h1>Bad Gateway</h1><p>The target app is not responding.</p>")
+    # The 502 used to be a fixed 60 bytes: "The target app is not
+    # responding." No hostname, no target, no owner, no directory, no log,
+    # no next command — so a dead app and a busy one produced byte-identical
+    # pages, and a 60-second font request came back with nothing to act on.
+    # The two need opposite responses (start it vs. go read why it is
+    # stuck), so the page names the app, the backend it points at, which
+    # of the two it was, who registered it, where it lives, and the exact
+    # command to run. Modeled on render_not_found, which already answers
+    # "nobody knows what this hostname is" properly.
+    def render_bad_gateway(sock, entry, host, reason = :refused)
+      kind = reason == :silent ? "backend-silent" : "backend-refused"
+      headers = { ERROR_HEADER => kind }
+      bare = Hostname.strip_port(host)
+      # Same DNS-rebinding boundary as render_not_found: a Host outside our
+      # TLDs is a website that got us to answer, not the local developer
+      # asking, so it never learns the app's directory or the agent's name.
+      return respond(sock, 502, "<h1>Bad Gateway</h1>", headers: headers) unless friendly_host?(bare)
+
+      target = entry ? entry["target"].to_s : ""
+      body = "<h1>Bad Gateway</h1><p>#{what_happened(reason, target)}</p>" \
+             "#{bad_gateway_owner(entry, bare)}#{bad_gateway_fix(entry)}"
+      respond(sock, 502, body, headers: headers)
     rescue IOError, SystemCallError
       nil
+    end
+
+    # Which of the two failures this was, said the way each one has to be
+    # read: not listening means start the app, silent means go find out why
+    # an app that is up is not answering. One "not responding" for both
+    # sends the reader to the wrong place either way.
+    def what_happened(reason, target)
+      at = target.empty? ? "" : " at <code>#{escape(target)}</code>"
+      case reason
+      when :silent
+        "The backend#{at} accepted the connection, then sent no response for " \
+          "#{format("%.4g", @head_timeout)} seconds — it is up, not down."
+      when :gone
+        "The backend#{at} accepted the connection, then closed it without " \
+          "sending a response."
+      else
+        "Nothing is listening#{at}."
+      end
+    end
+
+    def bad_gateway_owner(entry, host)
+      return "" if entry.nil?
+
+      # spec.dir, never Dir.pwd: the proxy runs from somewhere else entirely
+      # (a launchd daemon, a worktree of yamine itself), and inside one a
+      # Dir.pwd-derived path names the wrong checkout entirely.
+      dir = entry.dig("spec", "dir")
+      where = dir ? ", app in <code>#{escape(dir)}</code>" : ""
+      agent = entry["agent"].to_s
+      by = agent.empty? ? "" : " by agent <strong>#{escape(agent)}</strong>"
+      return "<p>Registered#{by}#{where}.</p>" if host.empty?
+
+      "<p>The backend for <strong>#{escape(host)}</strong> is registered#{by}#{where}.</p>"
+    end
+
+    def bad_gateway_fix(entry)
+      dir = entry&.dig("spec", "dir")
+      return "<p>Start it with <code>yamine start</code> in that app's directory.</p>" unless dir
+
+      log = File.join(dir, "log", "development.log")
+      "<p>Start it: <code>cd #{escape(dir)} && yamine start</code></p>" \
+        "<p>What it said before it went quiet: <code>#{escape(log)}</code></p>"
     end
 
     def render_loop(sock, host)
@@ -665,11 +832,13 @@ module Yamine
       nil
     end
 
-    def respond(sock, status, body)
+    def respond(sock, status, body, headers: {})
       message = { 404 => "Not Found", 502 => "Bad Gateway", 508 => "Loop Detected" }[status]
+      extra = headers.map { |k, v| "#{k}: #{v}\r\n" }.join
       write_all(sock, "HTTP/1.1 #{status} #{message}\r\n" \
                       "Content-Type: text/html\r\n" \
                       "#{HEALTH_HEADER}: 1\r\n" \
+                      "#{extra}" \
                       "Content-Length: #{body.bytesize}\r\n" \
                       "Connection: close\r\n\r\n#{body}")
     rescue IOError, SystemCallError
