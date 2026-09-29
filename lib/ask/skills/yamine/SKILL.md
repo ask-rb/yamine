@@ -36,6 +36,7 @@ no extra gem — the proxied hostname is allowed automatically via
 yamine start              # setup if needed, then boot every process (waits until healthy)
 yamine start --no-wait   # fire-and-forget (register routes immediately)
 yamine start --json       # machine-readable wait result (--wait default)
+yamine start --detach    # boot in the background; returns once healthy, prints url/pid/log
 yamine                    # same as start
 yamine stop               # stop this app's backend + routes
 yamine status             # show service, processes, and URLs
@@ -44,7 +45,16 @@ yamine log [-F]           # tail log/development.log (every process)
 
 `$PORT` and `YAMINE_URL` are injected per process; HTTP processes get
 stable URLs, background ones are supervised without routes. A process
-that exits cleans up the whole tree.
+that exits cleans up the whole tree — and ends the run with exit 1,
+naming that process, its exit status and the tail of its log. Zero from
+`yamine start` means the app is up.
+
+`--detach` is the one to use from a tool: it forks the boot, so the
+command returns with the URL, the pid that owns the tree (recorded in
+`routes.json`, so the route outlives the command) and that tree's log
+path under `~/.yamine/`. Run it again and it reports the running tree
+instead of starting a second one; `yamine stop` stops it. Do not reach
+for `nohup` — the tree yamine starts is the one `yamine stop` can reach.
 
 The boot narrates every phase — deps, db, schema, and each process's
 healthcheck — one line per phase, so a slow boot is never a black box:
@@ -192,6 +202,15 @@ yamine list --json            # routes as stable JSON
 yamine prune                  # clear stale routes from crashed sessions
 yamine start --json           # boot readiness payload (pass/fail + log tail)
 ```
+
+`yamine list` reports the state of the **app**, not of the yamine
+process that started it: `running`, `backend-gone` (the app died, the
+process that booted it is still there), `owner-gone` (both gone),
+`unknown` (no backend pid recorded — nothing is known, it is not a
+failure), and `reachable` / `unreachable` for a `yamine alias`, which
+points at a port rather than a process. `yamine restart` stops the
+backend; a managed app reboots on the next request, a `yamine start` app
+has to be started again.
 
 If a hostname does not resolve — or boot/doctor report it as not in
 `/etc/hosts` and you use clients that read only that file (CGO-disabled

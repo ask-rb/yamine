@@ -946,23 +946,33 @@ module Yamine
 
               yamine start              # block until every route is healthy, then supervise
               yamine start --no-wait   # fire-and-forget (register routes immediately)
+              yamine start --detach    # boot in the background, return once the app is healthy
               yamine start --json       # machine-readable result payload (--wait only)
               yamine start -- --help   # pass --help to the app, not here
 
             Options are passed through to the boot path:
               --variant <v> --tld <tld> --force --app-port <port>
-              --wait (alias, default) --no-wait --json
+              --wait (alias, default) --no-wait --json --detach
 
             Default waits: every process is spawned concurrently, each
             healthcheck (or TCP accept when none is declared) is polled,
             routes are registered only when all are healthy, and `ready:`
             is printed with exit 0. On failure everything spawned is
             killed, the failed process + its log tail is printed, and
-            the CLI exits 1 — no half-booted routes. `--no-wait` keeps
-            the old fire-and-forget path.
+            the CLI exits 1 — no half-booted routes. `--no-wait` keeps the
+            old fire-and-forget path.
+
+            --detach forks the boot: the child owns the tree, its pid is
+            the one recorded in routes.json, and this process waits for
+            the app to answer, prints the URL, that pid and the log path
+            under the state dir, then exits 0. It is idempotent — a tree
+            already running for this directory is reported, not started
+            again. --no-wait is ignored with it: the point of detaching is
+            that the command returns once the app is actually serving.
 
             Setup failures become hard errors pointing at `yamine setup`;
             non-interactive CI without a running proxy exits immediately.
+
           HELP
           return
         end

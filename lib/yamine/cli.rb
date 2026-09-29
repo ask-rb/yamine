@@ -83,6 +83,7 @@ module Yamine
 
         Usage:
           yamine start                 One-setup-and-go: setup if needed, then boot -> https://<app>.localhost
+          yamine start --detach        Same, in the background; returns once the app is healthy
           yamine setup                One-shot workstation setup without booting (run once)
           yamine                        Bare form of `start` — boots every process in config/local.yml
           yamine get <name>             Print URL for a service
@@ -103,10 +104,10 @@ module Yamine
           yamine hosts sync|clean       Manage /etc/hosts entries
           yamine kamal <variant>        Preview-deploy snippet for Kamal
           yamine stop                   Stop this app's backend + routes
-          yamine restart                Touch tmp/restart.txt
+          yamine restart                Touch tmp/restart.txt (a supervised app is stopped)
           yamine log [-F] [n]           Tail (or follow) log/development.log
 
-        Flags: --variant, --tld, --force, --app-port, --wait (default), --no-wait, --json, --branch
+        Flags: --variant, --tld, --force, --app-port, --wait (default), --no-wait, --detach, --json, --branch
         Env: YAMINE_VARIANT/TLD/PORT/STATE_DIR/AGENT, YAMINE_BRANCH=1
       HELP
     end

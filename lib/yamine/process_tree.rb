@@ -57,8 +57,57 @@ module Yamine
     # "can't be called from trap context" — a stop path that only works
     # outside a trap is a stop that never happens on Ctrl-C.
     PGROUP_LEADERS = {}
+    # Exit statuses of what we spawned, by pid, filled in by the reaper
+    # that `detach` starts. Same reasoning, same shape, and the same
+    # bounded cost as PGROUP_LEADERS above: an entry is a few dozen bytes
+    # per process this one ever spawned, dropped by `forget` whenever
+    # the pid is signalled.
+    STATUSES = {}
 
     module_function
+
+    # Spawn a child and reap it without blocking us, keeping what it
+    # exited with. A drop-in for Process.detach — nobody waits on a live
+    # backend, a dead pid is all the boot needs — that also keeps the one
+    # thing only a reaper can know. Without it the answer dies with the
+    # child: `kill(0, pid)` says a process is gone and nothing says
+    # whether it exited 0 or was killed, so "web is down" is all a
+    # supervisor could ever report.
+    #
+    # Unlocked, like PGROUP_LEADERS, and a Hash read from a supervision
+    # thread: every operation is a single call the GVL makes atomic.
+    def detach(pid)
+      return pid unless pid.to_i.positive?
+
+      Thread.new do
+        _waited, status = ::Process.waitpid2(pid)
+        STATUSES[pid] = status
+      rescue SystemCallError
+        nil
+      end
+      pid
+    end
+
+    # Process::Status for a pid we spawned, or nil when there is nothing
+    # to report: not our child, or it has not been reaped yet.
+    #
+    # Never blocks, which is the whole point — the caller is a loop that
+    # has other routes to watch, and asking a live child how it is doing
+    # would hang it. So a status that has not arrived yet is nil, and the
+    # caller asks again on its next pass.
+    def status(pid)
+      recorded = STATUSES[pid]
+      return recorded if recorded
+
+      # Not one of ours to have reaped (a pid out of a route entry, a
+      # double in a test): ask the kernel. WNOHANG so a live pid is not
+      # waited on, and ECHILD — which is the answer for anything that is
+      # not a child of ours — is a nil, not a failure.
+      _waited, status = ::Process.waitpid2(pid, ::Process::WNOHANG)
+      status
+    rescue StandardError
+      nil
+    end
 
     # Spawn a boot process as its own group leader and record that it is
     # one. This is the only place a boot process is created, so "every
@@ -85,8 +134,14 @@ module Yamine
       PGROUP_LEADERS.key?(pid)
     end
 
+    # Drop every record of a pid we have finished with. Both tables are
+    # about a spawn, not about a number that has to keep meaning one:
+    # leaving them behind is how a pid that later gets recycled gets
+    # signalled as a group it never led, or reported with an exit status
+    # that belongs to somebody else.
     def forget(pid)
       PGROUP_LEADERS.delete(pid)
+      STATUSES.delete(pid)
     end
 
     # Does this pid lead its own process group? Ours, if we spawned it.

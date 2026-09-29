@@ -355,11 +355,12 @@ as the app answering 404. `yamine status` reports which mode an app is in.
 
 ```bash
 yamine                        # boot app (waits until healthy, then supervises)
+yamine start --detach         # boot in the background; returns once healthy, prints url/pid/log
 yamine start --no-wait        # fire-and-forget (register routes immediately)
 yamine start --json           # machine-readable wait result (--wait default)
 yamine get <name>             # print URL for cross-service wiring
 yamine alias <name> <port>    # static route (e.g. Docker)
-yamine list [--json]          # show active routes (+ backend liveness)
+yamine list [--json]          # show active routes (+ the APP's liveness)
 yamine status [--json]        # show effective naming context here
 yamine doctor [--json]        # machine-readable health checks
 yamine open [name]            # open the app URL in a browser
@@ -369,7 +370,7 @@ yamine prune                  # remove stale routes
 yamine db list|create|drop|describe    # per-worktree databases (multi-database aware)
 yamine worktree list|add|remove|clean   # worktree lifecycle
 yamine stop                   # stop this app's backend + routes
-yamine restart                # touch tmp/restart.txt (managed apps reboot)
+yamine restart                # touch tmp/restart.txt (a supervised app's backend is stopped)
 yamine log [-F] [n]           # tail (or follow) log/development.log
 yamine proxy start|stop       # control the proxy
 yamine service install|status|uninstall   # root-owned OS startup service
@@ -413,7 +414,19 @@ in-process). Hostnames that fall outside the configured TLDs get a bare
 (healthcheck path when declared, TCP accept otherwise). On failure it
 exits 1 with the failed process, its phase, and the tail of its own log
 — no guessing, no polling, no half-booted routes. `--no-wait` keeps the
-old fire-and-forget path.
+old fire-and-forget path. A child that dies later ends the run the same
+way: exit 1, naming the process, its exit status (or the signal that
+took it down) and the tail of its log. Zero means the app is up.
+
+`yamine start --detach` boots the same tree into the background and
+returns once it is healthy, printing the URL, the pid that owns the tree
+and its log path under the state dir (`start-<hostname>.pid` /
+`start-<hostname>.log`). The boot runs in the child, so that pid is the
+one recorded in `routes.json` — the route outlives the command. It is
+idempotent (a tree already running for the directory is reported, not
+restarted), it ignores `--no-wait` (returning before the app answers is
+the thing it exists to prevent), and `--json` returns
+`{ok, url, pid, log_path, started}`.
 
 ## Log rotation
 
@@ -424,15 +437,29 @@ lose the tail. `doctor` warns when the state dir passes 100MB.
 
 ## Supervision
 
-Managed apps are supervised by the proxy daemon, not the CLI:
+Apps are supervised by the proxy daemon, not the CLI. A route is
+supervised when it names a directory to boot from (`spec.dir`), which
+is every app yamine boots — managed socket apps *and* `yamine start`
+trees. Static aliases are not.
 
-- idle backends stop after 15 minutes (`YAMINE_IDLE_TIMEOUT`
-  seconds; `0` disables) and boot transparently on the next request
-- touching `tmp/restart.txt` stops the backend; next request reboots it
-- crashed backends are detected and rebooted on the next request
-- daemon shutdown stops every supervised backend (no orphans)
+- touching `tmp/restart.txt` stops the backend. A managed socket app
+  then reboots on the next request; a `yamine start` app has to be
+  started again (`yamine restart` says which one you have)
+- crashed backends are detected, and a managed app is rebooted on the
+  next request
+- a managed app idle-kills after 15 minutes (`YAMINE_IDLE_TIMEOUT`
+  seconds; `0` disables) and boots transparently on the next request
+- daemon shutdown stops the backends the daemon booted (no orphans)
 
-Run-mode (TCP) routes and static aliases are never supervised.
+A `yamine start` app is **watched but not idle-killed**, and is not
+stopped when the proxy stops. Idle-kill is the half of puma-dev that
+depends on the other half — "stopped, boots on next request" — and the
+daemon can only keep that promise for a socket app: a tcp route's port
+is a free port chosen at boot and the route records no command to
+re-run, so nothing could bring it back. Set `YAMINE_IDLE_TCP=1` to get
+the puma-dev behaviour for `yamine start` apps too (same
+`YAMINE_IDLE_TIMEOUT` clock — the supervisor's, distinct from the
+proxy's own `YAMINE_PROXY_IDLE_TIMEOUT`).
 
 ## Ask ecosystem integration
 
