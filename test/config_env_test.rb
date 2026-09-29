@@ -156,14 +156,50 @@ class ConfigEnvTest < Minitest::Test
     store = Yamine::RouteStore.new(@dir)
     runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
     out_file = File.join(@dir, "env.txt")
+    child_log = File.join(@dir, "log", "development.log")
     runner.boot_run(name: "web", hostname: "myapp.localhost",
       url: "https://myapp.localhost", dir: @dir,
       command: ["sh", "-c", "printenv PROOF_OF_ENV > #{out_file}"],
       port: 4001, register: false, extra_env: env)
 
-    deadline = Time.now + 5
-    sleep 0.05 until File.file?(out_file) || Time.now > deadline
-    assert_equal "delivered", File.read(out_file).strip
+    assert_equal "delivered", wait_for_write(out_file, "PROOF_OF_ENV", log: child_log),
+      "the child booted, but PROOF_OF_ENV did not arrive from the config env"
+  end
+
+  # Read a file the child is still writing, once it has written something.
+  #
+  # `printenv PROOF_OF_ENV > file` creates the file in two steps: the
+  # shell sets up the redirection, then printenv runs and writes. Between
+  # those, the file exists and is empty, so waiting on File.exist? races
+  # the write and reports a wrong value as an empty string. Content is
+  # the only thing that is true after the write.
+  #
+  # The child cannot be waited on instead: boot_run calls Process.detach
+  # on the pid, which reaps it in a background thread, so Process.wait
+  # on that pid raises Errno::ECHILD rather than blocking until exit.
+  #
+  # Returns the content, or flunks on timeout — a value that never
+  # arrived is a different failure from a value that arrived wrong.
+  def wait_for_write(path, var, log: nil, timeout: 5)
+    deadline = Time.now + timeout
+    loop do
+      content = File.read(path).strip if File.file?(path)
+      return content unless content.nil? || content.empty?
+      break if Time.now > deadline
+      sleep 0.01
+    end
+    flunk "the spawned child booted but never wrote #{var} to #{path} " \
+      "within #{timeout}s -- #{var} did not reach the child from the config env" +
+      child_log_tail(log)
+  end
+
+  # The child's stdout and stderr are redirected to its log, so a boot
+  # that failed before the write says why there rather than in a blank
+  # assertion.
+  def child_log_tail(log)
+    return "" unless log && File.file?(log)
+    tail = File.read(log).strip.lines.last(5).to_a.join
+    tail.empty? ? "" : "\nchild log:\n#{tail}"
   end
 
   def test_yamine_own_variables_win_over_a_stray_config_key
