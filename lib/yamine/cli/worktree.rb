@@ -609,7 +609,14 @@ module Yamine
             # not stop with it (a live process whose cwd is about to be
             # deleted is exactly what must not survive here). A pid that
             # leads no group is signalled on its own, as before.
-            ProcessTree.term(backend_pid)
+            #
+            # And not a bare TERM: the directory is about to be deleted
+            # out from under whatever is left, so this stop has to be
+            # able to report "stopped" and mean it. `terminate`
+            # escalates, because a shell that is still assembling its
+            # tree forks the app after the signal sweep, and that app
+            # never hears the TERM at all (ProcessTree.terminate).
+            ProcessTree.terminate(backend_pid)
             ctx.wait_for_exit(backend_pid, timeout: 10)
           end
           ctx.store.remove_route(hostname)

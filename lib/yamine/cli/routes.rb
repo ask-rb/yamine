@@ -209,8 +209,12 @@ module Yamine
             # The sidecar names the `sh -c` shell a boot-mode backend was
             # spawned behind, so the whole group is signalled — otherwise
             # "Stopped" is reported while the app keeps serving (linux).
-            # A false return means there was nothing left to signal.
-            if ProcessTree.term(backend_pid)
+            # And it escalates rather than merely asking: a shell still
+            # assembling its tree forks the app after the signal sweep,
+            # so that app never hears the TERM and "Stopped" would be a
+            # lie (ProcessTree.terminate). A false return means there
+            # was nothing left to signal.
+            if ProcessTree.terminate(backend_pid)
               if ctx.wait_for_exit(backend_pid, timeout: 10)
                 stopped << "#{hostname} (backend #{backend_pid})"
               else

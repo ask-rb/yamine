@@ -349,8 +349,15 @@ module Yamine
       # group gets the signal: the app behind the shell is what must
       # actually stop. Falls back to the single pid for a process that
       # leads no group, and never raises (see ProcessTree).
+      #
+      # Escalated, because this is the "a failure leaves nothing running"
+      # contract and asking is not enough: a shell still assembling its
+      # tree forks the app after the signal sweep, and that app is then
+      # unreachable by the signal that was just sent to its group
+      # (ProcessTree.terminate). The signal-trap path stays on the
+      # single-shot `term` — a trap handler must not sleep.
       def stop_spawned_pid(pid)
-        ProcessTree.term(pid)
+        ProcessTree.terminate(pid)
       end
 
       # A background process (proxy: false) is spawned, logged, and

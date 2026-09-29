@@ -200,10 +200,19 @@ class BootOrphanSafetyTest < Minitest::Test
     File.write(File.join(@dir, "config", "local.yml"), content)
   end
 
-  # Scoped to THIS test's marker path: a leftover from a sibling test (or
-  # an earlier run in the same container) says nothing about the spawn
-  # under test, and would otherwise fail the assertion for the wrong
-  # reason.
+  # Every live process belonging to THIS test's marker path: a leftover
+  # from a sibling test (or an earlier run in the same container) says
+  # nothing about the spawn under test, and would otherwise fail the
+  # assertion for the wrong reason.
+  #
+  # It matches the `sh -c ruby <marker>` shell as well as the app behind
+  # it, and that is the point — the property under test is that the
+  # whole spawned tree is down, not just the pid yamine kept. The shell
+  # matching is also why this cannot be fooled by a dead process: a
+  # zombie's /proc/<pid>/cmdline is empty, so `pgrep -f` can never match
+  # one (verified on linux and macOS). What comes back here is
+  # therefore a count of LIVE processes, which is why no amount of
+  # waiting is the answer when it is not empty.
   #
   # Invoked as an argv array, never through a shell: backticks run
   # `sh -c "pgrep -f <marker>"`, and on linux dash forks instead of
@@ -214,10 +223,12 @@ class BootOrphanSafetyTest < Minitest::Test
     out.split("\n").map(&:to_i).reject { |pid| pid == Process.pid }
   end
 
-  # Reaping is asynchronous: the child is TERMed and exits on its own
+  # Reaping is asynchronous: the child is stopped and exits on its own
   # schedule, so a fixed sleep is a race the slower runner loses. Poll
-  # to a bound, then assert once — the behavior under test (no orphaned
-  # backend) is unchanged, only the wait.
+  # to a bound, then assert once — the behavior under test (no live
+  # backend left running) is unchanged, only the wait. The bound is not
+  # the assertion: a process still here after it is a survivor, and
+  # waiting longer would only hide that.
   def assert_reaped(message, timeout: 5)
     deadline = Time.now + timeout
     sleep 0.05 while marker_processes.any? && Time.now < deadline
@@ -225,17 +236,37 @@ class BootOrphanSafetyTest < Minitest::Test
     assert_empty marker_processes, message
   end
 
-  # The other half of "no survivors": the process has to have been
-  # RUNNING when the stop landed. Spawn returns before the backend is
+  # The other half of "no survivors": the backend has to have been
+  # RUNNING when the stop landed. Spawn returns long before the app is
   # up, so a stop that fires in that window leaves nothing behind and
   # assert_reaped passes — for the wrong reason, and on the linux bug
   # too. Every test that stops a tree waits for this first.
-  def wait_for_marker(timeout: 5)
+  #
+  # Waiting on `marker_processes` never established that, and the
+  # mismatch is exactly the one this class is about: the `sh -c` shell's
+  # own command line contains the marker, so pgrep matches it from the
+  # instant the spawn returns — before the shell has forked the app
+  # behind it. Stopping in that window is a race the app can lose: the
+  # shell takes the signal and the app comes up behind it, reparented to
+  # init and running, with its directory on the way out. That is a real
+  # outcome and it showed up as a CI flake, not as a test artefact.
+  #
+  # So wait for the app to answer instead. The marker is a TCP server by
+  # construction, and this is the same readiness boot's own --wait polls
+  # for: not "a process matching this path exists" but "the backend is
+  # serving".
+  def wait_for_marker(port, timeout: 10)
     deadline = Time.now + timeout
-    sleep 0.05 while marker_processes.empty? && Time.now < deadline
+    loop do
+      begin
+        TCPSocket.new("127.0.0.1", port).close
+        return true
+      rescue SystemCallError
+        flunk "the marker backend never began serving, so the stop under test proved nothing" if Time.now > deadline
 
-    refute_empty marker_processes,
-      "the marker backend never started, so the stop under test proved nothing"
+        sleep 0.05
+      end
+    end
   end
 
   # boot_run must not leave the backend alive when registration is
@@ -253,7 +284,7 @@ class BootOrphanSafetyTest < Minitest::Test
     # process that has not started yet would make the reaping assertion
     # pass for free.
     store.expects(:add_route).with { |*|
-      wait_for_marker
+      wait_for_marker(port)
       true
     }.once.raises(refused)
 
@@ -325,11 +356,12 @@ class BootOrphanSafetyTest < Minitest::Test
     YAML
     store = Yamine::RouteStore.new(@state)
     runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
+    port = Yamine::Ports.find_free
     app = runner.boot_run(name: "web", hostname: "stopme.localhost",
       url: "https://stopme.localhost", dir: @dir,
-      command: ["sh", "-c", "ruby #{@marker}"], port: Yamine::Ports.find_free)
+      command: ["sh", "-c", "ruby #{@marker}"], port: port)
     @pids << app.pid
-    wait_for_marker
+    wait_for_marker(port)
 
     code = nil
     out, = capture_io { code = Yamine::CLI::RoutesCommand.stop(Yamine::CLI::Context.new, []) }
@@ -348,11 +380,12 @@ class BootOrphanSafetyTest < Minitest::Test
   def test_worktree_remove_stops_the_shell_wrapped_backend_tree
     store = Yamine::RouteStore.new(@state)
     runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
+    port = Yamine::Ports.find_free
     app = runner.boot_run(name: "web", hostname: "gone.localhost",
       url: "https://gone.localhost", dir: @dir,
-      command: ["sh", "-c", "ruby #{@marker}"], port: Yamine::Ports.find_free)
+      command: ["sh", "-c", "ruby #{@marker}"], port: port)
     @pids << app.pid
-    wait_for_marker
+    wait_for_marker(port)
 
     ctx = Yamine::CLI::Context.new
     capture_io { Yamine::CLI::WorktreeCommand.stop_routes(ctx, @dir) }

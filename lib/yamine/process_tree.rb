@@ -136,5 +136,66 @@ module Yamine
     rescue SystemCallError
       false
     end
+
+    # Stop a tree and make sure it is GONE — for the callers that go on
+    # to delete the directory it runs in, drop the route, or report
+    # "Stopped <host>". `term` alone is not that promise: it hands the
+    # signal to the group and returns, and the kernel's sweep covers
+    # the members that exist at that instant. A `sh -c` shell that is
+    # still assembling its tree forks its app *after* the sweep, and
+    # that app never sees the signal at all.
+    #
+    # Measured on linux: TERM the group of a `sh -c "ruby <app>"` a
+    # few milliseconds after the spawn and the shell dies while the app
+    # comes up behind it, reparented to init and serving forever —
+    # a live process whose working directory is on the way out, which
+    # is the exact shape of the bug this module exists to kill. A stop
+    # that only asks cannot rule that out, so this asks and then
+    # insists: TERM, give the group a moment to leave on its own
+    # terms, KILL whatever is still in it.
+    #
+    # The liveness question is asked of the GROUP, not of the pid: a
+    # dead leader that is a zombie still answers `kill(0, pid)`, and a
+    # live tree behind one does not answer to its pid at all. The group
+    # is the only handle that tells the two apart.
+    #
+    # `term` is deliberately left alone: it is the primitive a signal
+    # trap handler uses (BootCommand.trap_cleanup), and a trap handler
+    # must not sit in a sleep loop.
+    def terminate(pid, grace: 5)
+      return false unless term(pid)
+
+      deadline = monotonic + grace
+      sleep 0.05 while group?(pid) && monotonic < deadline
+      return true unless group?(pid)
+
+      # A group that outlived its grace period is not draining, it is
+      # stuck or ignoring us, and the caller is about to delete what it
+      # runs in. No group_leader? check here: the leader is very likely
+      # already gone, and it is the members behind it that need the
+      # signal.
+      Process.kill("KILL", -pid)
+      true
+    rescue SystemCallError
+      # The group went away between the last look and this signal.
+      true
+    end
+
+    # Does this process group still have a member in it? Signal 0 asks
+    # the kernel about the group rather than about a pid, so it stays
+    # true while anything behind a dead leader is still running, and
+    # goes false only once the tree really is down.
+    def group?(pid)
+      return false unless pid.to_i.positive?
+
+      Process.kill(0, -pid)
+      true
+    rescue SystemCallError
+      false
+    end
+
+    def monotonic
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
   end
 end

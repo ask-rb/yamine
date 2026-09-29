@@ -18,6 +18,21 @@
   signalled by group id — the kernel is asked first — so the paths that
   never had a shell in front of them (a directly-spawned puma, a pid
   that is already gone) keep signalling exactly as before.
+- **A stop that lands while the tree is still being built no longer
+  leaves a live process behind.** The group signal reaches the members
+  that exist at the instant it is sent, and a `sh -c` shell that has
+  not forked its app yet forks it *after* that sweep — so the app never
+  hears the TERM, reparents to init, and goes on serving with its
+  directory already on the way out. Measured on linux: TERM the group a
+  few milliseconds after the spawn and the shell dies while the app
+  comes up behind it and stays up. Asking was never the same as
+  stopping, and every caller that goes on to report "Stopped", drop the
+  route, or delete the worktree was exposed. Stops now ask and then
+  insist: TERM the group, let it leave on its own terms briefly, and
+  KILL whatever is still in it — liveness asked of the *group*, since a
+  dead leader that is a zombie still answers to its own pid while a live
+  tree behind it does not. The signal-trap path keeps the single-shot
+  signal, because a trap handler must not sleep.
 
 ## [0.21.1] — 2026-09-29
 
