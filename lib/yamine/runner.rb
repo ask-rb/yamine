@@ -12,6 +12,12 @@ module Yamine
   # (puma-dev model). Without puma, managed degrades to rackup on TCP
   # (run-mode shape). Run mode (everything else): subprocess with
   # injected PORT/YAMINE_URL, readiness by TCP connect.
+  #
+  # Every spawn is reaped through ProcessTree.detach rather than
+  # Process.detach. Nothing waits on a live backend — a dead pid is all
+  # a health wait needs — and the reaper is the only thing that can
+  # still say what the child exited with once it is gone, which is what
+  # `yamine start` reports when a process dies mid-run.
   class Runner
     SOCKET_DIR = File.join("tmp", "sockets")
     SOCKET_NAME = "yamine.sock"
@@ -76,7 +82,7 @@ module Yamine
       config_ru = File.join(dir, "config.ru")
       cmd = ["rackup", "-o", "127.0.0.1", "-p", port.to_s, config_ru]
       pid = with_clean_env { spawn(env, *cmd, chdir: dir, out: log_path(dir, name), err: [:child, :out]) }
-      Process.detach(pid)
+      ProcessTree.detach(pid)
       unless wait_for_tcp(port, timeout: 60)
         stop_pid(pid)
         raise Error, "App '#{name}' did not boot within 60s. " \
@@ -113,7 +119,7 @@ module Yamine
         database_url: database_url, database_env: database_env, extra_env: extra_env)
       path = log_path(dir, name)
       pid = with_clean_env { ProcessTree.spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
-      Process.detach(pid)
+      ProcessTree.detach(pid)
       target = "127.0.0.1:#{port}"
       if register
         begin
@@ -146,7 +152,7 @@ module Yamine
         database_url: database_url, database_env: database_env, extra_env: extra_env)
       path = log_path(dir, name)
       pid = with_clean_env { ProcessTree.spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
-      Process.detach(pid)
+      ProcessTree.detach(pid)
       App.new(name: name, hostname: hostname, url: url, pid: pid,
         target: "127.0.0.1:#{port}", kind: "tcp", command: command)
     end
@@ -265,7 +271,7 @@ module Yamine
       env = child_env(dir, url: url, port: nil)
       cmd = socket_command(dir, socket_path)
       pid = with_clean_env { spawn(env, *cmd, chdir: dir, out: log_path(dir, name), err: [:child, :out]) }
-      Process.detach(pid)
+      ProcessTree.detach(pid)
       pid
     end
 

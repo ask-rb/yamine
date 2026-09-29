@@ -36,14 +36,7 @@ module Yamine
         routes = ctx.store.load_routes
         port = ctx.proxy_port
         tls = ctx.proxy_tls
-        entries = routes.map do |r|
-          { hostname: r["hostname"],
-            url: Hostname.url(r["hostname"], port: port, tls: tls),
-            target: r["target"], kind: r["kind"],
-            pid: r["pid"], agent: r["agent"],
-            supervised: !r["spec"].nil?,
-            alive: alive_state(ctx, r) }
-        end
+        entries = routes.map { |r| entry_for(ctx, r, port: port, tls: tls) }
         if json
           require "json"
           puts JSON.generate({ routes: entries, proxy_port: port, tls: tls })
@@ -59,6 +52,25 @@ module Yamine
           puts "  #{e[:url]}  ->  #{e[:target]}  #{label_for(e)}"
         end
         puts
+      end
+
+      # One route as `yamine list` reports it.
+      #
+      # `pid` stays the route's recorded owner (the yamine process that
+      # registered it — that is what routes.json holds and what
+      # `yamine stop` and the ownership gate compare), and `backend_pid`
+      # is added beside it because `alive` is now the app's state: an
+      # agent reading `alive: running` next to a `pid` that has since
+      # exited could not tell which process the verdict was about. Both
+      # are in the payload, so nothing that was readable is lost.
+      def entry_for(ctx, route, port:, tls:)
+        { hostname: route["hostname"],
+          url: Hostname.url(route["hostname"], port: port, tls: tls),
+          target: route["target"], kind: route["kind"],
+          pid: route["pid"], backend_pid: ctx.backend_pid_for(route),
+          agent: route["agent"],
+          supervised: !route["spec"].nil?,
+          alive: alive_state(ctx, route) }
       end
 
       # Shared discovery: `get --all` lists every live route (any owner)
@@ -89,24 +101,64 @@ module Yamine
         end
       end
 
+      # Liveness of the APP, not of the yamine process that registered
+      # the route. `route["pid"]` is that process's own pid — Runner
+      # passes Process.pid at every add_route call site — and it outlives
+      # the app it booted, so asking it whether the app is alive answered
+      # a different question. Every crashed backend read as "running",
+      # in the one command an agent would reach for to find out. The
+      # app's pid is in the sidecar the boot wrote
+      # (state_dir/backend-<hostname>.pid), the same file `yamine stop`
+      # reads for exactly this reason.
+      #
+      # Five states, and the split that matters is running vs
+      # backend-gone:
+      #
+      #   running       the app's process is there
+      #   backend-gone  the CLI is still up, the app it booted is not
+      #   owner-gone    nothing is there and no app pid was recorded
+      #   unknown       no app pid recorded, and the route's own process
+      #                 is — unknowable, deliberately not "down"
+      #   reachable /   a static alias (pid 0) names no process at all,
+      #   unreachable   so it reports the probe and nothing else
+      #
+      # `unknown` is the honest answer for a route with no sidecar: one
+      # written by a yamine old enough not to write sidecars, or by a
+      # boot that died between registering the route and writing the
+      # file. There is no evidence of a dead app there, and calling it
+      # down would have every pre-existing route on the machine read as
+      # broken after an upgrade.
       def alive_state(ctx, route)
-        if route["pid"] == 0
-          ctx.backend_alive?(route) ? "reachable" : "unreachable"
-        elsif ProxyControl.pid_alive?(route["pid"])
-          "running"
-        else
-          "owner-gone"
-        end
+        return ctx.backend_alive?(route) ? "reachable" : "unreachable" if route["pid"] == 0
+
+        backend = ctx.backend_pid_for(route)
+        return owner_state(ctx, route) if backend.nil?
+
+        ProxyControl.pid_alive?(backend) ? "running" : "backend-gone"
       rescue StandardError
         "unknown"
       end
 
+      # What we know with no app pid to ask: whether the process that
+      # registered the route is still there. `owner-gone` keeps the
+      # meaning it has always had — the route outlived its owner, which
+      # is the case load_routes leaves behind for `yamine prune`.
+      def owner_state(ctx, route)
+        ProxyControl.pid_alive?(route["pid"]) ? "unknown" : "owner-gone"
+      end
+
+      # The human line. The pid shown next to the state is the one the
+      # state is about: the app's, when there is one. Printing the route
+      # owner's pid beside "running" is how a dead app kept reading as a
+      # healthy one.
       def label_for(entry)
         owner = entry[:agent] ? " #{entry[:agent]}" : ""
         if entry[:pid] == 0
           "(alias, #{entry[:alive]}#{owner})"
+        elsif entry[:backend_pid]
+          "(backend #{entry[:backend_pid]}, #{entry[:alive]}#{owner})"
         else
-          "(pid #{entry[:pid]}, #{entry[:alive]}#{owner})"
+          "(owner #{entry[:pid]}, #{entry[:alive]}#{owner})"
         end
       end
 
@@ -115,6 +167,7 @@ module Yamine
       # report the probe, not a process.
       def route_label(ctx, route)
         entry = { pid: route["pid"], alive: alive_state(ctx, route) }
+        entry[:backend_pid] = ctx.backend_pid_for(route)
         label_for(entry)
       end
 
@@ -247,13 +300,37 @@ module Yamine
         2
       end
 
-      # Touch tmp/restart.txt so a supervised managed app reboots.
-      def restart(_ctx, _args)
+      # Touch tmp/restart.txt so a supervised app's backend is stopped.
+      #
+      # What happens next is not the same for every route, so it is said
+      # rather than assumed: a managed socket app is rebooted on the next
+      # request, while a `yamine start` app is stopped and has to be
+      # started again (the daemon cannot rebuild a tcp backend — see
+      # Supervisor#rebootable?). The old one-liner promised a reboot for
+      # both, and for a tcp route nothing was even watching the file.
+      def restart(ctx, _args)
         path = File.join(Dir.pwd, "tmp", "restart.txt")
         require "fileutils"
         FileUtils.mkdir_p(File.dirname(path))
         FileUtils.touch(path)
-        puts "Touched #{path} — managed app restarts on next request."
+        puts "Touched #{path}."
+        # The routes this directory registered, found by spec.dir rather
+        # than by resolving the app: the file was written either way, and
+        # a directory with no config/local.yml must not turn a no-op into
+        # a config error.
+        here = File.expand_path(Dir.pwd)
+        entries = ctx.store.load_routes.select { |r| r.dig("spec", "dir") == here }
+        if entries.empty?
+          puts "No yamine app is registered for this directory — nothing will be restarted."
+          return
+        end
+        entries.each do |entry|
+          if entry["kind"] == "socket"
+            puts "#{entry["hostname"]} reboots on the next request."
+          else
+            puts "#{entry["hostname"]} will be stopped; start it again with `yamine start`."
+          end
+        end
       end
 
       # Tail the shared app log (default 50 lines); --follow streams.

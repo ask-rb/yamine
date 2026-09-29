@@ -50,14 +50,44 @@ class CommandSplitTest < Minitest::Test
     FileUtils.remove_entry(state) if state
   end
 
+  # `yamine list` labels each route with the state of the APP, so the
+  # fixture has to be a backend: the route's own pid is the yamine
+  # process that registered it, and asking that one whether the app is
+  # alive is how every crashed backend used to read as "running". The
+  # sidecar (state_dir/backend-<hostname>.pid) is where the app's pid
+  # lives, so that is what the label is now read from.
   def test_list_shows_liveness_labels
     dir = Dir.mktmpdir
     orig = ENV["YAMINE_STATE_DIR"]
     ENV["YAMINE_STATE_DIR"] = dir
     store = Yamine::RouteStore.new(dir)
     store.add_route("up.localhost", "127.0.0.1:4001", Process.pid, kind: "tcp")
+    # This process is alive, so it stands in for a live backend.
+    File.write(File.join(dir, "backend-up.localhost.pid"), "#{Process.pid}\n")
     _code, out = capture { Yamine::CLI.run(["list"]) }
     assert_includes out, "running"
+    assert_includes out, "backend #{Process.pid}"
+  ensure
+    ENV["YAMINE_STATE_DIR"] = orig
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  # The other half of the same fix, and the case the old label could not
+  # express: the process that registered the route is still there, the
+  # app it booted is not. That is not "running", and it is not
+  # "owner-gone" either.
+  def test_list_reports_a_dead_app_under_a_live_owner
+    dir = Dir.mktmpdir
+    orig = ENV["YAMINE_STATE_DIR"]
+    ENV["YAMINE_STATE_DIR"] = dir
+    store = Yamine::RouteStore.new(dir)
+    store.add_route("crashed.localhost", "127.0.0.1:4002", Process.pid, kind: "tcp")
+    dead = spawn("true")
+    Process.wait(dead)
+    File.write(File.join(dir, "backend-crashed.localhost.pid"), "#{dead}\n")
+    _code, out = capture { Yamine::CLI.run(["list"]) }
+    assert_includes out, "backend-gone"
+    refute_includes out, "crashed.localhost  ->  127.0.0.1:4002  (pid"
   ensure
     ENV["YAMINE_STATE_DIR"] = orig
     FileUtils.remove_entry(dir) if dir

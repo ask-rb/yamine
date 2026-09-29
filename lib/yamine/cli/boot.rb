@@ -8,6 +8,13 @@ module Yamine
     # No inference, no Procfile at boot, no single-process default.
     module BootCommand
       PORT_IGNORING = %w[jekyll middleman bridgetown].freeze
+      # How long the detaching process waits for the app to answer before
+      # it reports that it did not. Generous on purpose: the boot running
+      # inside the child has its own budget per phase (Readiness's, 45s a
+      # process, plus deps/db/schema), and this is the parent giving up
+      # on a child still doing legitimate work. A boot that fails ends
+      # the wait on its own, long before this.
+      DETACH_TIMEOUT = 300
 
       module_function
 
@@ -16,12 +23,14 @@ module Yamine
       # boots every process, supervises the tree, cleans up on exit.
       def run_inferred(ctx, args)
         variant = ENV["YAMINE_VARIANT"]
-        opts = ctx.parse_flags(args, %i[variant tld force app_port wait no_wait json branch])
+        opts = ctx.parse_flags(args, %i[variant tld force app_port wait no_wait json branch detach])
         resolved = resolve!(ctx, variant: opts[:variant] || variant, tld: opts[:tld],
           use_branch: opts[:branch])
         # Ownership gate before any side effects: no proxy spawn, no
         # port allocation when we'd refuse anyway.
         check_worktree_ownership!(ctx, resolved, force: opts[:force])
+        return detach_boot(ctx, resolved, opts) if opts[:detach]
+
         ensure_proxy!(ctx, json: opts[:json])
         boot_all(ctx, resolved, opts)
       end
@@ -163,8 +172,19 @@ module Yamine
         routes_registered.each { |r| named_pids[r[:app].pid] = r[:app].name }
         children.each { |c| named_pids[c[:pid]] = c[:name] }
         all_hostnames = routes_registered.flat_map { |r| r[:hostnames] }
+        # Nothing to supervise is not a boot. collect_spawns refuses a
+        # compound cmd line with an error and leaves the plan empty, and
+        # the boot then printed `ready: ` and sat in supervise_tree for
+        # ever with an empty pid map — a hang indistinguishable from a
+        # healthy start, and one `--detach` would have made its caller
+        # wait out. The errors above it name the process it refused.
+        if named_pids.empty?
+          $stderr.puts "Error: no process was started — see the errors above."
+          exit 1
+        end
         trap_cleanup(ctx, all_hostnames, named_pids.keys)
-        supervise_tree(ctx, all_hostnames, named_pids, reporter: events)
+        supervise_tree(ctx, all_hostnames, named_pids, reporter: events,
+          json: opts[:json])
       end
 
       # TERM the old server and make sure the pidfile no longer names
@@ -332,13 +352,10 @@ module Yamine
       end
 
       def tail_for(failure, apps)
-        name = failure[:name]
-        slot = apps[name]
-        path = slot ? File.expand_path(File.join(Dir.pwd, "log", "development.log")) : nil
-        lines = path && File.file?(path) ? File.readlines(path).last(20).join : "(no log file)"
-        { path: path, tail: lines }
-      rescue SystemCallError
-        { path: path, tail: "(unreadable log)" }
+        # Every process appends to the same file, so the app slot only
+        # decides whether there is a process to blame for it.
+        path = apps[failure[:name]] ? app_log_path : nil
+        { path: path, tail: path ? log_tail(path) : "(no log file)" }
       end
 
       def stop_spawned(app)
@@ -845,30 +862,278 @@ module Yamine
         File.file?(File.join(Dir.pwd, "config", "application.rb"))
       end
 
+      # `yamine start --detach`: boot into the background and hand control
+      # back, so an agent gets its prompt (and its exit code) without
+      # reaching for nohup.
+      #
+      # The route's recorded owner pid is the thing this has to get
+      # right, and it is why the boot happens in the child and never in
+      # the parent: `add_route` records `Process.pid`, and
+      # RouteStore#load_routes prunes every route whose pid is dead. A
+      # parent that registered the routes and exited would have its own
+      # route pruned on the next read, and the proxy would 503 an app
+      # that is running perfectly well. So the child boots — its pid is
+      # what lands in routes.json — keeps the tree supervised, and
+      # outlives this process. The parent only waits and reports.
+      def detach_boot(ctx, resolved, opts)
+        hostname = Resolver.hostname_for(resolved, Resolver.primary_proc(resolved))
+        raise Error, "no HTTP process (proxy: true) in config/local.yml to detach" unless hostname
+
+        url = Hostname.url(hostname, port: ctx.proxy_port, tls: ctx.proxy_tls)
+        pidfile, log = detach_paths(ctx.store, hostname)
+        running = detached_pid(pidfile) || foreground_owner(ctx, hostname)
+        return report_detached(hostname, url, log, running, opts, started: false) if running
+
+        # Ensured here, in the process still attached to the caller: a
+        # sudo prompt, a port clash or a missing setup has to be reported
+        # by something whose exit code and output the caller can see.
+        ensure_proxy!(ctx, json: opts[:json])
+        pid = fork { detached_child(ctx, resolved, opts, hostname, pidfile, log) }
+        await_detached(ctx, hostname, url, log, pid, opts)
+      end
+
+      # Detach bookkeeping under the state dir, beside the routes the
+      # tree owns. The pidfile is the only record of WHICH process
+      # supervises a detached tree (routes.json holds the app's route and
+      # `yamine stop` reaches the backend through the sidecar), which is
+      # also what makes a second `--detach` a no-op instead of a second
+      # app fighting over the same hostname.
+      def detach_paths(store, hostname)
+        [File.join(store.dir, "start-#{hostname}.pid"),
+         File.join(store.dir, "start-#{hostname}.log")]
+      end
+
+      # The pid of a detached tree, or nil. A pidfile whose process is
+      # gone is not a tree — it is a crash or a stop that never got to
+      # clean up — and reading it as one would make `--detach` refuse to
+      # start anything on that hostname again.
+      def detached_pid(pidfile)
+        return nil unless File.file?(pidfile)
+
+        pid = File.read(pidfile).strip.to_i
+        pid.positive? && ProxyControl.pid_alive?(pid) ? pid : nil
+      rescue SystemCallError, ArgumentError
+        nil
+      end
+
+      # A foreground `yamine start` in this directory has no pidfile, so
+      # the route it registered is the other record of a tree already
+      # running here. Without this, `--detach` beside a live foreground
+      # boot would fork, lose the race for the route, and report a boot
+      # failure for an app that is up and serving.
+      def foreground_owner(ctx, hostname)
+        entry = ctx.store.find(hostname)
+        return nil unless entry && entry["pid"] != 0
+        return nil unless entry["agent"] == Agent.name
+        return nil unless entry.dig("spec", "dir") == File.expand_path(Dir.pwd)
+
+        ProxyControl.pid_alive?(entry["pid"]) ? entry["pid"] : nil
+      end
+
+      # The detached half: its own session, its own stdio, and the whole
+      # boot. `setsid` so the tree outlives the shell that started it and
+      # takes no SIGHUP from a terminal about to close; the log file so
+      # the boot's narration, and the message that ends the run, have
+      # somewhere to land once this process is gone.
+      def detached_child(ctx, resolved, opts, hostname, pidfile, log)
+        Process.setsid
+        redirect_detached_io(log)
+        File.write(pidfile, "#{Process.pid}\n")
+        # `--no-wait` has nothing left to say here: the promise of
+        # detaching is that the command returns once the app answers, so
+        # the child always takes the health-gated path.
+        boot_all(ctx, resolved, opts.merge(no_wait: nil, detach: nil))
+      rescue SystemExit => e
+        # The boot exits on purpose — a failed health wait, a child that
+        # died, a signal from `yamine stop` — and that status is the only
+        # report there will ever be. `exit!` rather than `exit` because a
+        # forked block turns a raise into a generic failure, and rather
+        # than a normal exit because the pidfile is ours to remove: a
+        # dead tree must not leave a pidfile claiming one is running.
+        detach_forget(pidfile)
+        exit!(e.status)
+      rescue StandardError => e
+        $stderr.puts "[yamine] detached boot failed: #{e.message.lines.first&.strip}"
+        detach_forget(pidfile)
+        exit!(1)
+      end
+
+      # stdin from /dev/null so a read never blocks on a terminal that
+      # has gone away; both streams into the log; sync, because a
+      # buffered stream in a process that may live for hours is a log
+      # that shows nothing until it exits.
+      def redirect_detached_io(log)
+        io = Log.open_append(log)
+        $stdin.reopen(File::NULL)
+        $stdout.reopen(io)
+        $stderr.reopen(io)
+        $stdout.sync = $stderr.sync = true
+      ensure
+        io&.close
+      end
+
+      # Remove the pidfile, but only while it is still ours: a second
+      # `--detach` that already replaced the file must not have its
+      # record deleted by the first tree's cleanup.
+      def detach_forget(pidfile)
+        return unless File.read(pidfile).strip.to_i == Process.pid
+
+        FileUtils.rm_f(pidfile)
+      rescue SystemCallError
+        nil
+      end
+
+      # Wait for the app to answer, then say what happened. Two things
+      # end the wait: the route appears — which on the health-gated path
+      # means every process passed its check, since the child registers
+      # nothing until they all do — or the child exits, which is a boot
+      # that failed and has already written why into the log.
+      #
+      # The route's recorded pid is what proves it is THIS child's: a
+      # route left over from an earlier run would otherwise pass for a
+      # successful boot of one that never happened.
+      def await_detached(ctx, hostname, url, log, pid, opts)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DETACH_TIMEOUT
+        status = nil
+        loop do
+          entry = ctx.store.find(hostname)
+          return report_detached(hostname, url, log, pid, opts, started: true) if
+            entry && entry["pid"] == pid
+          # WNOHANG, and it has to be a wait: the child is this
+          # process's own child, so a dead one sits in the process table
+          # as a zombie until it is reaped and `kill(0, pid)` would
+          # report it alive for as long as we sat here waiting.
+          _waited, status = Process.waitpid2(pid, Process::WNOHANG)
+          break if status
+          if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+            status = :timeout
+            break
+          end
+
+          sleep 0.25
+        end
+        detach_failed(hostname, url, log, status, opts)
+      end
+
+      # The report on success, and the report on "was already up": the
+      # URL, the pid that owns the tree, and where its output goes.
+      # `--json` gets the same three as a payload, because an agent's
+      # next move is `yamine list` and "started" with no pid to stop
+      # again is not a usable answer.
+      def report_detached(hostname, url, log, pid, opts, started:)
+        payload = { ok: true, url: url, hostnames: [hostname], pid: pid,
+          log_path: log, started: started }
+        if opts[:json]
+          puts JSON.generate(payload)
+          return
+        end
+        if started
+          puts "Detached: #{url}"
+        else
+          puts "Already running: #{url} (pid #{pid})"
+          puts "  Nothing was started; `yamine stop` stops this one."
+          return
+        end
+        puts "  pid  #{pid}"
+        puts "  log  #{log}"
+      end
+
+      # Never zero, and never "started". The reason it is not serving is
+      # in the log and nowhere else, so that is where the report points.
+      def detach_failed(hostname, url, log, status, opts)
+        reason =
+          case status
+          when :timeout then "did not become healthy within #{DETACH_TIMEOUT}s"
+          when nil then "was killed before serving"
+          else "exited (#{describe_status(status)})"
+          end
+        payload = { ok: false, url: url, hostnames: [hostname], reason: reason,
+          log_path: log, log_tail: log_tail(log) }
+        if opts[:json]
+          $stderr.puts "Error: yamine start --detach: #{hostname} #{reason}."
+          puts JSON.generate(payload)
+        else
+          $stderr.puts "Error: yamine start --detach: #{hostname} #{reason}."
+          $stderr.puts log_tail(log, lines: 10)
+          $stderr.puts "  log: #{log}"
+        end
+        exit 1
+      end
+
+      # The one log every process in a tree appends to (Runner#log_path),
+      # so it is also the one log worth reading when a child dies.
+      def app_log_path
+        File.expand_path(File.join(Dir.pwd, "log", "development.log"))
+      end
+
+      # Last lines of the app log, for failure payloads and for the
+      # message that ends a run. Never raises: a missing or unreadable
+      # log is part of the failure being reported, not a second failure.
+      def log_tail(path = app_log_path, lines: 20)
+        return "(no log file)" unless File.file?(path)
+
+        File.readlines(path).last(lines).join
+      rescue SystemCallError
+        "(unreadable log)"
+      end
+
+      # What a pid we spawned exited with, in words an agent can read:
+      # a code, or the signal that took it down. A pid with no status to
+      # report (never ours, not yet reaped) says so rather than guessing
+      # a code.
+      def describe_status(status)
+        return "status unknown" unless status
+        return "signal #{status.termsig}" if status.signaled?
+
+        "exit #{status.exitstatus}"
+      end
+
       # Supervise the booted tree: the first child to exit ends the run,
       # because a half-stack is worse than no stack — a dead jobs worker
       # with a live web process looks healthy until someone wonders why
-      # nothing is being processed. Name the casualty and its log: "a
-      # process exited" left the user to guess which one, and the log
-      # worth reading is per-process.
-      def supervise_tree(ctx, hostnames, named_pids, reporter: nil)
+      # nothing is being processed. Name the casualty, its status and its
+      # log: "a process exited" left the user to guess which one, and the
+      # log worth reading is the one every process appends to.
+      #
+      # The status is 1, never 0. `yamine start` is how an agent decides
+      # whether the app came up, and a zero here reads as "healthy": the
+      # routes are already removed, the rest of the tree is being killed,
+      # and the app is not serving. An agent that trusted it would go on
+      # to curl a URL that answers 503 and blame the app. It is the code
+      # the --wait path already uses for a boot that never became
+      # healthy, so "the app is not up" stays one meaning — and it is a
+      # different question from the one `yamine stop` answers with its
+      # 0/2/3/4, which is about what a stop did.
+      def supervise_tree(ctx, hostnames, named_pids, reporter: nil, json: false)
         loop do
           sleep 0.5
           dead = named_pids.find { |pid, _| !ProxyControl.pid_alive?(pid) }
-          if dead
-            pid, name = dead
-            $stderr.puts "\n[#{name}] exited (pid #{pid}) — stopping the whole tree."
-            log = File.join(Dir.pwd, "log", "development.log")
-            $stderr.puts "  log: #{log}" if File.file?(log)
-            reporter&.note("#{name} exited; cleaning up routes")
-            cleanup_routes(ctx, hostnames)
-            # Kill remaining children — by group, so a `sh -c` backend's
-            # process dies with the shell we hold a pid for.
-            named_pids.each_key do |other|
-              ProcessTree.term(other)
-            end
-            exit 0
+          next unless dead
+
+          pid, name = dead
+          status = ProcessTree.status(pid)
+          log = app_log_path
+          $stderr.puts "\n[#{name}] exited (pid #{pid}, #{describe_status(status)}) " \
+            "— stopping the whole tree."
+          reporter&.note("#{name} exited; cleaning up routes")
+          if json
+            # stdout stays the machine stream: the event lines above it,
+            # this payload last, exactly as the --wait failure reads.
+            puts JSON.generate({ ok: false, error: "child-exited", name: name,
+              pid: pid, status: status&.exitstatus, signal: status&.termsig,
+              log_path: File.file?(log) ? log : nil,
+              log_tail: log_tail(log) }.compact)
+          elsif File.file?(log)
+            $stderr.puts log_tail(log, lines: 10)
+            $stderr.puts "  log: #{log}"
           end
+          cleanup_routes(ctx, hostnames)
+          # Kill remaining children — by group, so a `sh -c` backend's
+          # process dies with the shell we hold a pid for.
+          named_pids.each_key do |other|
+            ProcessTree.term(other)
+          end
+          exit 1
         end
       end
 

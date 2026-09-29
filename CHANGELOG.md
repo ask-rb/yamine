@@ -2,6 +2,106 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`yamine start --detach` — boot in the background and get your prompt
+  back.** An agent (or a script) that needs an app running had one
+  option: block, or reach for `nohup` — which leaves a process tree
+  whose owner the first Ctrl-C cannot reach. `--detach` forks the boot:
+  the child takes its own session, records its pid in
+  `~/.yamine/start-<hostname>.pid`, sends its own output to
+  `~/.yamine/start-<hostname>.log`, boots, keeps the tree supervised and
+  outlives the shell that started it. The parent waits for the app to
+  answer, prints the URL, that pid and the log path, and exits 0.
+  The boot happens in the child on purpose: `add_route` records
+  `Process.pid`, and `load_routes` prunes any route whose pid is dead, so
+  a parent that registered the routes and exited would have its own route
+  pruned on the next read and the proxy would 503 an app that is running
+  perfectly well. It is idempotent — a tree already running for the
+  directory (detached, or foreground) is reported, not started again —
+  and a boot that never becomes healthy exits 1 with the log instead of
+  a tree that is not there. `--json` gets the same three facts
+  as a payload. `--no-wait` is ignored with `--detach`: returning before
+  the app answers is the lie this flag exists to stop.
+
+### Fixed
+
+- **`yamine list` and `yamine get --all` report the app, not the CLI
+  that started it.** A route's `pid` is the yamine process that
+  registered it, and it outlives the app it booted, so `alive_state` was
+  asking the wrong process whether the app was alive: every crashed
+  backend read as `running`, in the one command an agent would reach for
+  to find out. Liveness now comes from the sidecar the boot already
+  writes (`backend-<hostname>.pid`, the same file `yamine stop` reads),
+  and the vocabulary says what it knows:
+  `running` (the app's process is there), `backend-gone` (the CLI is
+  still up, the app it booted is not), `owner-gone` (nothing is there
+  and no app pid was recorded), `unknown` (no app pid recorded, and the
+  route's own process is — a route written before sidecars existed, or
+  by a boot that died between registering the route and writing the
+  file: `unknown`, never "down", so no pre-existing route reads as
+  broken after an upgrade), and `reachable` / `unreachable` for a static
+  alias, which names no process and keeps reporting the probe.
+  `list --json` gained `backend_pid` beside `pid` so the state and the
+  process it is about travel together, and the human line prints the
+  backend's pid rather than the owner's.
+- **`yamine restart` works for the apps yamine started.** Supervision
+  required `kind == "socket"`, and `yamine start` registers `kind
+  "tcp"`, so a `yamine start` tree was invisible to the daemon:
+  `yamine restart` touched `tmp/restart.txt`, printed "managed app
+  restarts on next request", and nothing was watching the file. Any
+  route carrying a spec is now watched, so restart.txt and crash
+  detection reach both kinds. Two things that were broken *inside* the
+  socket case went with it: the restart baseline was re-derived while
+  `restart.txt` did not exist, so the *first* `yamine restart` an app
+  ever got was absorbed as the new baseline and did nothing; and the
+  "restarting" latch was never cleared, so a route was supervised for
+  exactly one event in the life of the daemon. The kill now signals the
+  process group when the pid leads one, because a tcp route's sidecar
+  names the `sh -c` shell the boot wrapped the app in.
+- **A child that dies no longer ends `yamine start` with exit 0.**
+  `supervise_tree` exited 0 with the routes already removed and the rest
+  of the tree being killed, so a zero read as "the app came up" to
+  anything scripted — which then blamed the app for the 503 it was
+  about to get. It exits 1, the same code `--wait` already uses for a
+  boot that never became healthy, and the message names the process, its
+  exit status (or the signal that took it down — a reaped child is the
+  only place that answer exists, so the reaper keeps it) and the tail of
+  the app log. `--json` gets the same as
+  `{"ok": false, "error": "child-exited", …}`. `yamine stop`'s
+  0/2/3/4 are untouched: those answer "what did the stop do", and this
+  answers "is the app up".
+- **`yamine restart` no longer promises a reboot it cannot perform.**
+  A managed socket app is rebooted on the next request; a `yamine start`
+  app is stopped and has to be started again, because the daemon cannot
+  rebuild a tcp backend (its port is a free port chosen at boot and the
+  route records no command to re-run). The command and the daemon's own
+  events now say which one you have.
+- **A boot that started nothing no longer reports `ready:` and hangs.**
+  A process whose `cmd` is a compound line is refused with an error and
+  leaves the spawn plan empty; the boot then printed `ready:` and sat in
+  the supervision loop for ever with nothing to watch — a hang that looks
+  exactly like a healthy start. It exits 1 instead, naming the error
+  above it.
+
+### Changed
+
+- **A `yamine start` app is watched by the proxy daemon, but is not
+  idle-killed.** This is the one visible consequence of the supervision
+  fix above, so it is called out rather than buried: previously *no*
+  `yamine start` app was ever idle-killed, and now restart.txt and crash
+  detection work — but the idle clock still does not touch them, because
+  idle-kill is the half of puma-dev that depends on the other half
+  ("stopped, boots on next request"), and the daemon cannot keep that
+  promise for a tcp route. Killing one would take a developer's app down
+  for an afternoon and leave a 503 where it was. Set `YAMINE_IDLE_TCP=1`
+  for the puma-dev behaviour on `yamine start` apps, with the same
+  `YAMINE_IDLE_TIMEOUT` clock (15 minutes by default; that is the
+  supervisor's clock, distinct from the proxy's own
+  `YAMINE_PROXY_IDLE_TIMEOUT`). For the same reason `yamine proxy stop`
+  no longer stops `yamine start` apps along with the socket ones the
+  daemon booted: those have a supervising process of their own.
+
 ### Fixed
 
 - **A slow app and a dead app no longer come back as the same useless
