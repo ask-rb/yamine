@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.21.2] — 2026-09-29
+
 ### Fixed
 
 - **Linux no longer orphans the app behind a boot's shell.** Every
