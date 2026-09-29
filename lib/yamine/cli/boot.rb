@@ -345,10 +345,12 @@ module Yamine
         stop_spawned_pid(app.pid)
       end
 
+      # The pid of a spawned process is its `sh -c` shell, so the whole
+      # group gets the signal: the app behind the shell is what must
+      # actually stop. Falls back to the single pid for a process that
+      # leads no group, and never raises (see ProcessTree).
       def stop_spawned_pid(pid)
-        Process.kill("TERM", pid)
-      rescue SystemCallError
-        nil
+        ProcessTree.term(pid)
       end
 
       # A background process (proxy: false) is spawned, logged, and
@@ -853,9 +855,10 @@ module Yamine
             $stderr.puts "  log: #{log}" if File.file?(log)
             reporter&.note("#{name} exited; cleaning up routes")
             cleanup_routes(ctx, hostnames)
-            # Kill remaining children
+            # Kill remaining children — by group, so a `sh -c` backend's
+            # process dies with the shell we hold a pid for.
             named_pids.each_key do |other|
-              Process.kill("TERM", other) rescue nil
+              ProcessTree.term(other)
             end
             exit 0
           end
@@ -893,7 +896,11 @@ module Yamine
         %w[INT TERM].each do |sig|
           trap(sig) do
             cleanup_routes(ctx, hostnames)
-            pids.each { |pid| Process.kill("TERM", pid) rescue nil }
+            # The children are in their own process groups, so the
+            # terminal's signal reaches only us — this is the one place
+            # their trees get told to stop. By group, not by pid: a
+            # `sh -c` backend's real process is behind the pid we hold.
+            pids.each { |pid| ProcessTree.term(pid) }
             exit 0
           end
         end
@@ -905,7 +912,9 @@ module Yamine
             entry = ctx.store.find(h)
             pid = ctx.backend_pid_for(entry) if entry
             if pid && ProxyControl.pid_alive?(pid)
-              Process.kill("TERM", pid) rescue nil
+              # Group, not pid: the sidecar names the `sh -c` shell, and
+              # the app behind it is the process that must stop.
+              ProcessTree.term(pid)
             end
             ctx.store.remove_route(h, owner_pid: Process.pid) rescue nil
             FileUtils.rm_f(File.join(ctx.store.dir, "backend-#{h}.pid"))

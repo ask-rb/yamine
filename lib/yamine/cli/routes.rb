@@ -206,14 +206,17 @@ module Yamine
 
           backend_pid = ctx.backend_pid_for(entry)
           if backend_pid && ProxyControl.pid_alive?(backend_pid)
-            begin
-              Process.kill("TERM", backend_pid)
+            # The sidecar names the `sh -c` shell a boot-mode backend was
+            # spawned behind, so the whole group is signalled — otherwise
+            # "Stopped" is reported while the app keeps serving (linux).
+            # A false return means there was nothing left to signal.
+            if ProcessTree.term(backend_pid)
               if ctx.wait_for_exit(backend_pid, timeout: 10)
                 stopped << "#{hostname} (backend #{backend_pid})"
               else
                 stopped << "#{hostname} (backend #{backend_pid} still draining)"
               end
-            rescue SystemCallError
+            else
               gone << hostname
             end
           else

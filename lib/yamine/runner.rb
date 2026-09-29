@@ -96,6 +96,12 @@ module Yamine
     # view yamine's failure payloads use. Interleaving matches the
     # foreman/without-yamine experience.
     #
+    # Spawned through ProcessTree, not Kernel#spawn: the command is an
+    # argv that starts with `sh -c` (collect_spawns), so the pid we get
+    # back is the shell. Its own process group is what makes the process
+    # behind it stoppable — stop signals the group (ProcessTree.term),
+    # and the shell cannot leave its child outside the group it leads.
+    #
     # extra_env is the config's env.clear/env.secret for this process —
     # yamine's own keys (PORT, YAMINE_URL, DATABASE_URL, the TLS vars)
     # win over it, because those describe the boot rather than the app.
@@ -106,7 +112,7 @@ module Yamine
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
         database_url: database_url, database_env: database_env, extra_env: extra_env)
       path = log_path(dir, name)
-      pid = with_clean_env { spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
+      pid = with_clean_env { ProcessTree.spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
       Process.detach(pid)
       target = "127.0.0.1:#{port}"
       if register
@@ -130,12 +136,16 @@ module Yamine
     # whole tree up concurrently, then polls every route until healthy.
     # Returns the placeholder App (target known before bind). Fate of
     # the backend is decided by wait, not by spawn.
+    #
+    # Through ProcessTree, for the same reason as boot_run: a `sh -c`
+    # pid is not the process doing the work, so its group is the only
+    # handle that reaches it.
     def spawn_http(name:, hostname:, url:, dir:, command:, port:, rails_dev_host: nil,
       database_url: nil, database_env: nil, force: false, extra_env: nil)
       env = child_env(dir, url: url, port: port, rails_dev_host: rails_dev_host,
         database_url: database_url, database_env: database_env, extra_env: extra_env)
       path = log_path(dir, name)
-      pid = with_clean_env { spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
+      pid = with_clean_env { ProcessTree.spawn(env, *command, chdir: dir, out: path, err: [:child, :out]) }
       Process.detach(pid)
       App.new(name: name, hostname: hostname, url: url, pid: pid,
         target: "127.0.0.1:#{port}", kind: "tcp", command: command)
@@ -340,10 +350,14 @@ module Yamine
 
     private
 
+    # A backend we spawned is stopped by its whole group: the pid we
+    # hold for a run-mode process is the `sh -c` shell, and on linux the
+    # app behind it does not see a signal aimed at that shell alone.
+    # A pid that leads no group (the socket spawns, a pid already gone)
+    # falls back to the single-pid signal. Never raises: a stopped
+    # backend is the goal, and "it was already dead" is a success here.
     def stop_pid(pid)
-      Process.kill("TERM", pid)
-    rescue SystemCallError
-      nil
+      ProcessTree.term(pid)
     end
   end
 end

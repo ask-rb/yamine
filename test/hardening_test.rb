@@ -217,3 +217,137 @@ class RailsDevHostTest < Minitest::Test
     FileUtils.remove_entry(dir) if dir
   end
 end
+
+# ProcessTree is what makes a stop reach the process BEHIND the `sh -c`
+# wrapper that every boot process is spawned behind. The decision under
+# test is "given what the kernel says about this pid, what do we
+# signal?" — a negative pid means "the process group whose id is that
+# number", so a pid that does not lead a group must never be signalled
+# that way: the number could be somebody else's group entirely.
+class ProcessTreeSignalTest < Minitest::Test
+  def alive?(pid)
+    Process.kill(0, pid)
+    true
+  rescue SystemCallError
+    false
+  end
+
+  def test_a_group_leader_is_signalled_by_group_id
+    Process.stubs(:getpgid).returns(4242)
+
+    # The whole tree in one syscall: this negative pid is the fix.
+    Process.expects(:kill).with("TERM", -4242)
+    assert Yamine::ProcessTree.term(4242)
+  end
+
+  def test_a_pid_that_leads_no_group_is_signalled_on_its_own
+    # In group 99, not group 4242: the number is not the group.
+    Process.stubs(:getpgid).returns(99)
+
+    Process.expects(:kill).with("TERM", 4242)
+    assert Yamine::ProcessTree.term(4242)
+  end
+
+  def test_a_group_signal_that_fails_falls_back_to_the_pid
+    Process.stubs(:getpgid).returns(4242)
+    Process.stubs(:kill).with("TERM", -4242).raises(Errno::ESRCH)
+
+    Process.expects(:kill).with("TERM", 4242)
+    assert Yamine::ProcessTree.term(4242)
+  end
+
+  # A pid that is already gone is the state every stop path wants, so it
+  # is a false return and not an exception: `yamine stop` branches on it
+  # to report the backend as gone.
+  def test_a_dead_pid_is_false_and_not_an_error
+    Process.stubs(:getpgid).raises(Errno::ESRCH)
+    Process.stubs(:kill).raises(Errno::ESRCH)
+
+    refute Yamine::ProcessTree.term(4242)
+  end
+
+  def test_a_missing_pid_is_false_and_signals_nothing
+    Process.expects(:kill).never
+
+    refute Yamine::ProcessTree.term(nil)
+    refute Yamine::ProcessTree.term(0)
+  end
+
+  # The reading the record exists to override. `pgroup: true` puts the
+  # setpgid in the child, so "still in my group" can be a true answer
+  # about a process that IS a leader — and the stop must not degrade to
+  # the single-pid signal on it.
+  def test_a_recorded_spawn_is_a_leader_whatever_the_kernel_says
+    Process.stubs(:getpgid).returns(99)
+
+    # A command that exits on its own: the signals are stubbed here, so
+    # there is nothing to clean up afterwards.
+    pid = Yamine::ProcessTree.spawn("true", out: File::NULL)
+    Process.detach(pid)
+
+    Process.expects(:kill).with("TERM", -pid)
+    assert Yamine::ProcessTree.term(pid)
+  end
+
+  # The other reading. A process group outlives its leader: a `sh -c`
+  # shell that died on its own leaves the app behind it running in that
+  # group, and the group signal is the only handle left on it — ESRCH
+  # for the dead shell reads exactly like "leads no group".
+  def test_a_recorded_spawn_still_signals_its_group_once_the_leader_is_gone
+    Yamine::ProcessTree.note_group_leader(4242)
+    Process.stubs(:getpgid).raises(Errno::ESRCH)
+
+    Process.expects(:kill).with("TERM", -4242)
+    assert Yamine::ProcessTree.term(4242)
+  end
+
+  # ...and the record is about the spawn, not about the pid forever: a
+  # pid that gets recycled must fall back to what the kernel says.
+  def test_a_recorded_pid_is_forgotten_once_it_has_been_stopped
+    pid = Yamine::ProcessTree.spawn("sleep", "30", out: File::NULL)
+    Process.detach(pid)
+    assert Yamine::ProcessTree.term(pid)
+
+    refute Yamine::ProcessTree.known_group_leader?(pid)
+    # Reused pid, now some unrelated process that leads no group.
+    Process.stubs(:getpgid).returns(7)
+    refute Yamine::ProcessTree.group_leader?(pid)
+  end
+
+  # A trap handler is not a normal call site. yamine stops its processes
+  # from inside one (BootCommand.trap_cleanup, i.e. Ctrl-C), and
+  # Mutex#synchronize raises "can't be called from trap context" there
+  # — which turns "the stop ran" into "the whole tree is still up".
+  # Delivered to this very process, so the real handler runs.
+  def test_a_stop_works_from_inside_a_trap_handler
+    pid = Yamine::ProcessTree.spawn("sleep", "30", out: File::NULL)
+    Process.detach(pid)
+    Signal.trap("USR1") { Yamine::ProcessTree.term(pid) }
+    Process.kill("USR1", Process.pid)
+
+    reaped = false
+    deadline = Time.now + 5
+    until reaped || Time.now > deadline
+      sleep 0.05
+      reaped = !alive?(pid)
+    end
+    assert reaped, "a stop issued from a trap handler must actually stop the tree"
+  ensure
+    Signal.trap("USR1", "DEFAULT")
+    Yamine::ProcessTree.term(pid, signal: "KILL") if pid
+  end
+
+  # The other half, against the kernel rather than a record: a pgroup
+  # spawn really does become a leader. Asked with a bound, because the
+  # answer is settled a few microseconds after the spawn returns.
+  def test_a_pgroup_spawn_becomes_its_own_leader
+    pid = Process.spawn("sleep", "30", pgroup: true, out: File::NULL)
+    Process.detach(pid)
+
+    deadline = Time.now + 5
+    sleep 0.01 until Yamine::ProcessTree.group_leader?(pid) || Time.now > deadline
+    assert Yamine::ProcessTree.group_leader?(pid)
+  ensure
+    Yamine::ProcessTree.term(pid, signal: "KILL") if pid
+  end
+end

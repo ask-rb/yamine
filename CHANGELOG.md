@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Linux no longer orphans the app behind a boot's shell.** Every
+  process is spawned as `["sh", "-c", cmd]`, so the pid yamine tracks
+  is the *shell* — and on Linux a TERM to that shell does not reach the
+  app behind it, which reparents to init and keeps running. Every stop
+  path inherited the hole: `yamine stop` printed "Stopped <host>" and
+  left the app serving, Ctrl-C left the whole tree up, and
+  `yamine worktree remove` deleted the directory under a live process.
+  (macOS forwards the signal, which is why the unit suite never saw
+  it.) Each process now spawns as its own process-group leader and
+  stop signals the *group*, so one syscall reaches the shell and
+  everything below it. Only a pid that actually leads a group is
+  signalled by group id — the kernel is asked first — so the paths that
+  never had a shell in front of them (a directly-spawned puma, a pid
+  that is already gone) keep signalling exactly as before.
+
 ## [0.21.1] — 2026-09-29
 
 ### Fixed

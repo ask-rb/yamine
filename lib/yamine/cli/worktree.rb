@@ -604,12 +604,13 @@ module Yamine
           hostname = entry["hostname"]
           backend_pid = ctx.backend_pid_for(entry)
           if backend_pid && ProxyControl.pid_alive?(backend_pid)
-            begin
-              Process.kill("TERM", backend_pid)
-              ctx.wait_for_exit(backend_pid, timeout: 10)
-            rescue SystemCallError
-              nil
-            end
+            # Group, not pid: a boot-mode backend's sidecar names the
+            # `sh -c` shell, and on linux the app behind that shell does
+            # not stop with it (a live process whose cwd is about to be
+            # deleted is exactly what must not survive here). A pid that
+            # leads no group is signalled on its own, as before.
+            ProcessTree.term(backend_pid)
+            ctx.wait_for_exit(backend_pid, timeout: 10)
           end
           ctx.store.remove_route(hostname)
           FileUtils.rm_f(File.join(ctx.store.dir, "backend-#{hostname}.pid"))

@@ -189,7 +189,9 @@ class BootOrphanSafetyTest < Minitest::Test
   def teardown
     Dir.chdir(@orig_dir)
     ENV["YAMINE_STATE_DIR"] = @orig_state
-    @pids.each { |pid| Process.kill("KILL", pid) rescue nil }
+    # By group, like the lib: a tracked pid is a `sh -c` shell, and
+    # killing only that would leave the process behind it running.
+    @pids.each { |pid| Yamine::ProcessTree.term(pid, signal: "KILL") }
     FileUtils.remove_entry(@dir) rescue nil
     FileUtils.remove_entry(@state) rescue nil
   end
@@ -223,6 +225,19 @@ class BootOrphanSafetyTest < Minitest::Test
     assert_empty marker_processes, message
   end
 
+  # The other half of "no survivors": the process has to have been
+  # RUNNING when the stop landed. Spawn returns before the backend is
+  # up, so a stop that fires in that window leaves nothing behind and
+  # assert_reaped passes — for the wrong reason, and on the linux bug
+  # too. Every test that stops a tree waits for this first.
+  def wait_for_marker(timeout: 5)
+    deadline = Time.now + timeout
+    sleep 0.05 while marker_processes.empty? && Time.now < deadline
+
+    refute_empty marker_processes,
+      "the marker backend never started, so the stop under test proved nothing"
+  end
+
   # boot_run must not leave the backend alive when registration is
   # refused (quota, route conflict) — the App is spawned first, so the
   # failure path owns the cleanup.
@@ -230,20 +245,30 @@ class BootOrphanSafetyTest < Minitest::Test
     store = Yamine::RouteStore.new(@state)
     runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
     port = Yamine::Ports.find_free
+    refused = Yamine::QuotaExceededError.new("agent", 1, 1)
     # once: proves the spawn+register path was actually reached before
-    # the refusal — otherwise the assertion is vacuous.
-    store.expects(:add_route).once.raises(
-      Yamine::QuotaExceededError.new("agent", 1, 1))
+    # the refusal — otherwise the assertion is vacuous. The with-block
+    # runs before the raise (mocha matches first), which is where the
+    # backend gets its chance to be alive: refusing the route of a
+    # process that has not started yet would make the reaping assertion
+    # pass for free.
+    store.expects(:add_route).with { |*|
+      wait_for_marker
+      true
+    }.once.raises(refused)
 
-    # Spawn the backend directly: the command has no metacharacters, and
-    # behind a `sh -c` wrapper the pid yamine tracks is the SHELL — TERM
-    # to that wrapper never reaches the backend behind it (on linux dash
-    # forks rather than exec'ing, and forwards nothing), so the orphan
-    # would be an artifact of the wrapper, not of the reaping under test.
+    # The `sh -c` wrapper is the case under test, not an obstacle to it:
+    # collect_spawns wraps EVERY boot command, so the pid being reaped is
+    # the shell and the backend is the process behind it. This test was
+    # narrowed to a direct spawn because on linux a TERM to the shell
+    # never reached that backend — it survived with PPID 1. It passes
+    # now because boot_run spawns the tree as its own process group and
+    # stop_pid signals the group; the wrapper stays so that regression
+    # can never go back to being uncovered.
     assert_raises(Yamine::QuotaExceededError) do
       runner.boot_run(name: "web", hostname: "x.localhost",
         url: "https://x.localhost", dir: @dir,
-        command: ["ruby", @marker], port: port)
+        command: ["sh", "-c", "ruby #{@marker}"], port: port)
     end
     assert_reaped "a backend whose registration was refused must be reaped"
   end
@@ -256,11 +281,13 @@ class BootOrphanSafetyTest < Minitest::Test
       db: false
       processes:
         web:
-          # exec: collect_spawns wraps every cmd in `sh -c`, and TERM to
-          # that wrapper never reaches the backend behind it. exec hands
-          # the tracked pid to the backend, so the assertion stays on the
-          # reaping this failure path is responsible for.
-          cmd: exec ruby #{@marker}
+          # No `exec` dodge: collect_spawns wraps every cmd in `sh -c`, so
+          # the pid this failure path reaps is the shell and the backend
+          # is the process behind it. The boot's --wait readiness poll
+          # means that process is answering TCP by the time the raise
+          # happens, so "nothing survived" here means the tree really was
+          # taken down — the assertion the linux bug made impossible.
+          cmd: ruby #{@marker}
           proxy: true
     YAML
     ctx = Yamine::CLI::Context.new
@@ -279,6 +306,59 @@ class BootOrphanSafetyTest < Minitest::Test
     assert_reaped "a raise after spawn must not orphan the backend"
     assert_empty ctx.store.load_routes_raw,
       "a raise after registration must not leave routes behind"
+  end
+
+  # `yamine stop` is the path a human runs, and the only one that runs
+  # in a DIFFERENT process from the boot: it has nothing but the route
+  # entry and the backend sidecar to work with. That pid is the `sh -c`
+  # shell, so before the group fix it printed "Stopped <host>" and left
+  # a live backend behind the removed route on linux — the app kept
+  # serving with nothing left pointing at it.
+  def test_stop_reaps_the_shell_wrapped_backend_tree
+    write_config(<<~YAML)
+      service: stopme
+      db: false
+      processes:
+        web:
+          cmd: ruby #{@marker}
+          proxy: true
+    YAML
+    store = Yamine::RouteStore.new(@state)
+    runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
+    app = runner.boot_run(name: "web", hostname: "stopme.localhost",
+      url: "https://stopme.localhost", dir: @dir,
+      command: ["sh", "-c", "ruby #{@marker}"], port: Yamine::Ports.find_free)
+    @pids << app.pid
+    wait_for_marker
+
+    code = nil
+    out, = capture_io { code = Yamine::CLI::RoutesCommand.stop(Yamine::CLI::Context.new, []) }
+
+    assert_equal 0, code, out
+    assert_match(/Stopped stopme\.localhost/, out)
+    assert_reaped "yamine stop must not leave the backend behind the shell"
+  end
+
+  # `yamine worktree remove` is the harshest stop: the directory is
+  # about to be deleted out from under whatever is running in it, and it
+  # runs in a process that never spawned the backend — all it is handed
+  # is the route entry (spec.dir) and the sidecar. Same `sh -c` pid, same
+  # trap: it used to remove the route, print "stopped", and leave a live
+  # process behind with its working directory deleted.
+  def test_worktree_remove_stops_the_shell_wrapped_backend_tree
+    store = Yamine::RouteStore.new(@state)
+    runner = Yamine::Runner.new(store: store, on_log: ->(_m) {})
+    app = runner.boot_run(name: "web", hostname: "gone.localhost",
+      url: "https://gone.localhost", dir: @dir,
+      command: ["sh", "-c", "ruby #{@marker}"], port: Yamine::Ports.find_free)
+    @pids << app.pid
+    wait_for_marker
+
+    ctx = Yamine::CLI::Context.new
+    capture_io { Yamine::CLI::WorktreeCommand.stop_routes(ctx, @dir) }
+
+    assert_reaped "removing a worktree must not leave a backend behind the shell"
+    assert_empty ctx.store.load_routes_raw, "and it must not leave the route behind"
   end
 
   # The own-orphan check is conservative: only puma naming this app (or
