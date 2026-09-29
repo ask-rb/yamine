@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-29
+
 ### Added
 
 - **`yamine start --detach` — boot in the background and get your prompt
@@ -132,7 +134,6 @@
   POST never replays — the body is already consumed off the client socket
   and cannot be resent faithfully, and a duplicated message is worse than
   a slow page.
-
 ## [0.21.2] — 2026-09-29
 
 ### Fixed
