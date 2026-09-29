@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A slow app and a dead app no longer come back as the same useless
+  502.** Waiting for the backend's response *head* and waiting for body
+  bytes shared one clock, and `read_head` swallowed its own timeout into
+  the same `[nil, ...]` a dead backend returns — so `pipe_request` could
+  not tell them apart and every one of them got the same 60-byte page,
+  "The target app is not responding." A font request that took 60,068ms
+  came back with no hostname, no target, no owner, no directory and no
+  next step. The head now has its own budget
+  (`YAMINE_PROXY_HEAD_TIMEOUT`, default 60s — the same bound it already
+  got, so nothing that works today starts failing), the body keeps
+  `YAMINE_PROXY_IDLE_TIMEOUT` untouched, and a silent backend is reported
+  as what it is: *the backend at 127.0.0.1:3000 accepted the connection,
+  then sent no response for 60 seconds*, with the owning agent, the app's
+  own directory (`spec.dir`, not the proxy's cwd — inside a worktree that
+  is the wrong checkout), the path to its `log/development.log`, and the
+  `cd <dir> && yamine start` that fixes it. Machines get the same split
+  in a header: `x-yamine-error: backend-refused` or `backend-silent`.
+  A body clock that was tuned tight for one and a head clock that is not
+  are no longer the same dial, so a streaming response that goes quiet
+  between bytes still runs indefinitely.
+- **A request that was merely slow now gets a second attempt.** One
+  retry, and only where a retry cannot duplicate work: a refused dial
+  never reached the app, so any method replays; a head timeout means the
+  head *did* arrive, so only bodiless GET, HEAD and OPTIONS replay. A
+  GET that takes 61 seconds to answer now serves instead of 502ing. A
+  POST never replays — the body is already consumed off the client socket
+  and cannot be resent faithfully, and a duplicated message is worse than
+  a slow page.
+
 ## [0.21.2] — 2026-09-29
 
 ### Fixed
