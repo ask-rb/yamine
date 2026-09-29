@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.21.1] — 2026-09-29
+
+### Fixed
+
+- **Claiming a per-worktree database no longer raises `NoMethodError`
+  on Ruby 3.2/3.3.** The claim stamps the state file with
+  `Time#iso8601`, but `lib/yamine/database.rb` never required the
+  stdlib `time` library, and on 3.2/3.3 nothing else loads it
+  implicitly — so every claim raised (34 unit errors on those rubies
+  in CI). 0.21.0 is affected. One `require "time"`, alongside the
+  stdlibs that file already pulls in.
+- **A closed WebSocket upgrade no longer leaks a thread on Linux.**
+  `pipe_both` tore each end down with `close` from the sibling
+  thread, and a close from another thread does not interrupt that
+  copy's blocking read on Linux (it does on macOS) — so every closed
+  upgrade parked a thread forever, `handle` never unwound, and they
+  accumulated in the root daemon. Teardown is now symmetric
+  `shutdown(2)`, which wakes the parked read with EOF; both sockets
+  still close exactly once, and no timeout was added to the
+  unbounded upgrade path.
+
 ## [0.21.0] — 2026-09-28
 
 ### Security
