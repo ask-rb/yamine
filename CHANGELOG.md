@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-02
+
+### Fixed
+
+- **A stalled response body closes the connection instead of appending a
+  502 into a live 200.** When a response relay went quiet past the idle
+  bound, the IdleTimeout escaped `forward`'s two rescues (it is neither
+  HeadTimeout nor EOFError), landed in `handle`'s generic IOError rescue,
+  and rendered a whole second response head into the body the browser was
+  already reading. The page died of the corruption with no error anywhere
+  naming a cause — DevTools even showed the 502 as if a server had sent
+  it. A response whose head has been sent can now only end one way: the
+  connection closes, the stall is logged with the request that died, and
+  no second head is ever written.
+- **`backend-refused` no longer lies about what failed.** `dial` mapped
+  every SystemCallError to :refused, so a proxy out of file descriptors
+  answered "Nothing is listening at 127.0.0.1:4486" and sent the reader
+  off to restart an app that was perfectly fine. EMFILE/ENFILE now read
+  as `proxy-exhausted` and blame the proxy's own limit; every other dial
+  error reads as `proxy-unreachable`; a backend that accepts and closes
+  without answering reads as `backend-gone` instead of masquerading as
+  refused. The 502 page says which of these it was, and carries the fix
+  for that failure rather than a start command for an app that is up.
+
+### Added
+
+- **The root daemon can finally be debugged.** The launchd plist and the
+  systemd unit carried no log paths, so the one proxy process serving
+  traffic discarded every error it ever reported — the mislabeled 502
+  above was invisible precisely because of this. Both streams now land
+  in `proxy.log` in the state dir, and the daemon rotates that log at
+  boot (one generation kept), the same rule the spawned proxy already
+  applied.
+
 ## [0.22.1] - 2026-09-29
 
 ### Fixed

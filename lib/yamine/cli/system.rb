@@ -97,6 +97,11 @@ module Yamine
           if foreground
             write_tls_marker(ctx, tls)
             write_tlds_file(ctx, tlds)
+            # The daemon appends to this log for its whole life (launchd
+            # and systemd both redirect their streams here), so each boot
+            # rotates first — one generation kept, the same rule the
+            # spawned proxy's Log.open_append already applies.
+            Log.rotate(File.join(ctx.store.dir, "proxy.log"))
             # Record BEFORE serving. This process (the launchd/systemd
             # service, or a hand-run foreground proxy) IS the proxy, and
             # every reader trusts these files: doctor, Context's URL
@@ -468,8 +473,37 @@ module Yamine
         # the user-writable gem directory it was staged from. (The
         # interpreter stays RbConfig.ruby: no root-owned Ruby >= 3.2
         # exists, so that residual risk is reported, not hidden.)
+        plist = launchd_plist(state_dir: state_dir, home: home)
+        remove_legacy_launchd(dir)
+        FileUtils.mkdir_p(dir)
+        path = File.join(dir, "#{LAUNCHD_LABEL}.plist")
+        File.write(path, plist)
+        File.chmod(0o644, path)
+        # launchd requires /Library/LaunchDaemons plists to be
+        # root-owned; we are root here (sudo re-exec). Enforce it
+        # explicitly: File.write keeps an existing file's owner, so a
+        # stale user-owned plist from an older version would otherwise
+        # survive the overwrite and bootstrap fails with error 5.
+        # Trust the CA into the System keychain while elevated: silent
+        # (no GUI popup) and trusted for every user on the machine.
+        File.chown(0, 0, path) if Process.uid.zero?
+        ensure_system_ca_trust
+        puts "    Registering the launchd service on port 443..."
+        launchctl_bootstrap(path)
+        puts "Installed root LaunchDaemon on port 443 (state: #{state_dir})."
+        puts "    Payload: #{PrivilegedPayload.bin_path} (root-owned, version-independent)."
+        puts "    Log: #{File.join(state_dir, "proxy.log")}."
+      end
+
+      # Pure plist builder (testable without root). Both output streams
+      # point at the state dir's proxy.log: a root daemon whose errors
+      # launchd discards cannot be debugged at all, and one whole
+      # misdiagnosed failure class came from exactly that blindness —
+      # the proxy's own account of a dial failure never reached disk.
+      def launchd_plist(state_dir:, home:)
         payload_bin = PrivilegedPayload.bin_path
-        plist = <<~PLIST
+        log_path = File.join(state_dir, "proxy.log")
+        <<~PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -489,27 +523,11 @@ module Yamine
             </dict>
             <key>KeepAlive</key><true/>
             <key>RunAtLoad</key><true/>
+            <key>StandardOutPath</key><string>#{log_path}</string>
+            <key>StandardErrorPath</key><string>#{log_path}</string>
           </dict>
           </plist>
         PLIST
-        remove_legacy_launchd(dir)
-        FileUtils.mkdir_p(dir)
-        path = File.join(dir, "#{LAUNCHD_LABEL}.plist")
-        File.write(path, plist)
-        File.chmod(0o644, path)
-        # launchd requires /Library/LaunchDaemons plists to be
-        # root-owned; we are root here (sudo re-exec). Enforce it
-        # explicitly: File.write keeps an existing file's owner, so a
-        # stale user-owned plist from an older version would otherwise
-        # survive the overwrite and bootstrap fails with error 5.
-        # Trust the CA into the System keychain while elevated: silent
-        # (no GUI popup) and trusted for every user on the machine.
-        File.chown(0, 0, path) if Process.uid.zero?
-        ensure_system_ca_trust
-        puts "    Registering the launchd service on port 443..."
-        launchctl_bootstrap(path)
-        puts "Installed root LaunchDaemon on port 443 (state: #{state_dir})."
-        puts "    Payload: #{payload_bin} (root-owned, version-independent)."
       end
 
       # True when the trust store covers the CA this machine should be
@@ -587,9 +605,12 @@ module Yamine
       # Pure unit-file builder (testable without root). Binds 80/443 at
       # boot; the proxy runs with the invoking user's state dir. The
       # payload is the root-owned staged path — never the gem directory.
-      def systemd_unit
-        home = user_home_for_service
-        state_dir = ENV["YAMINE_STATE_DIR"] || File.join(home, ".yamine")
+      # Both output streams append to the state dir's proxy.log, matching
+      # the launchd unit, so a daemon that misbehaves can be read.
+      def systemd_unit(state_dir: nil, home: nil)
+        home ||= user_home_for_service
+        state_dir ||= ENV["YAMINE_STATE_DIR"] || File.join(home, ".yamine")
+        log_path = File.join(state_dir, "proxy.log")
         <<~UNIT
           # /etc/systemd/system/yamine.service  (binds 80/443 at boot)
           [Unit]
@@ -599,6 +620,8 @@ module Yamine
           ExecStart=#{RbConfig.ruby} #{PrivilegedPayload.bin_path} proxy start --foreground --port #{ProxyControl::DEFAULT_TLS_PORT}
           Environment=YAMINE_STATE_DIR=#{state_dir}
           Environment=HOME=#{home}
+          StandardOutput=append:#{log_path}
+          StandardError=append:#{log_path}
 
           [Install]
           WantedBy=multi-user.target
