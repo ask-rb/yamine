@@ -222,4 +222,83 @@ class ProxyBadGatewayTest < Minitest::Test
       front&.close
     end
   end
+
+  # A backend that takes the connection and closes it without a word —
+  # not silence (connection held, nothing said) and not refusal (nothing
+  # ever accepted). All three read differently for the person debugging,
+  # so all three must ride their own header class.
+  def gone_backend
+    server = TCPServer.new("127.0.0.1", 0)
+    thread = Thread.new do
+      sock = server.accept
+      head = +""
+      head << sock.gets until head =~ /\r\n\r\n\z/
+      sock.close
+    end
+    [server, thread]
+  end
+
+  def test_backend_gone_is_labeled_backend_gone
+    server, serve = gone_backend
+
+    with_route("myapp.localhost", "127.0.0.1:#{server.addr[1]}") do |store, _app|
+      proxy = proxy_for(store)
+      front = TCPServer.new("127.0.0.1", 0)
+      handler = serve_once(proxy, front)
+
+      response = get(front.addr[1])
+
+      assert_includes response, "x-yamine-error: backend-gone",
+        "closed-without-answering is its own failure; calling it refused points the reader at the app"
+      assert_includes response, "closed it without sending a response"
+    ensure
+      front&.close
+    end
+  ensure
+    serve&.kill
+    server&.close
+  end
+
+  # dial() used to map every SystemCallError to :refused, so a proxy out
+  # of file descriptors answered "Nothing is listening at 127.0.0.1:4486"
+  # and sent the reader off to restart an app that was perfectly fine —
+  # the exact wrong turn one debugging evening took.
+  def test_dial_failures_classify_by_errno
+    proxy, = proxy_for(build_store)
+
+    assert_equal :refused, proxy.send(:failure_reason, Errno::ECONNREFUSED.new("Connection refused"))
+    assert_equal :exhausted, proxy.send(:failure_reason, Errno::EMFILE.new("Too many open files"))
+    assert_equal :exhausted, proxy.send(:failure_reason, Errno::ENFILE.new("File table overflow"))
+    assert_equal :unreachable, proxy.send(:failure_reason, Errno::EHOSTUNREACH.new("No route to host"))
+  end
+
+  def test_exhausted_proxy_502_blames_the_proxy_not_the_backend
+    proxy, = proxy_for(build_store)
+    entry = {"hostname" => "myapp.localhost", "target" => "127.0.0.1:9",
+             "spec" => {"dir" => "/tmp/app"}, "agent" => "codex"}
+    a, b = UNIXSocket.pair
+
+    proxy.send(:render_bad_gateway, a, entry, "myapp.localhost", :exhausted)
+    a.close
+
+    response = b.read
+    assert_includes response, "x-yamine-error: proxy-exhausted"
+    assert_includes response, "file descriptors"
+    refute_includes response, "Nothing is listening",
+      "an fd limit in the proxy must never read as a dead backend"
+    refute_includes response, "yamine start",
+      "the fix is restarting the proxy, not starting an app that is up"
+  ensure
+    a&.close
+    b&.close
+  end
+
+  def build_store
+    dir = Dir.mktmpdir
+    store = Yamine::RouteStore.new(dir)
+    store.add_route("myapp.localhost", "127.0.0.1:9", 0, kind: "tcp")
+    store
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
 end

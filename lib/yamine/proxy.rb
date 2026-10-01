@@ -329,6 +329,13 @@ module Yamine
           keep, reason = forward(sock, entry, method, target, headers, buf)
         end
 
+        if reason == :body_lost
+          # The response head already reached the client; there is no
+          # answer left to give, only a connection to close. A 502 here
+          # would be garbage appended to a live response.
+          break
+        end
+
         if reason
           render_bad_gateway(sock, entry, host, reason)
           break
@@ -344,7 +351,7 @@ module Yamine
 
     # One attempt at the backend: dial, forward the request, relay the
     # response. Returns [keep_alive?, reason], where reason is nil on
-    # success and otherwise names which backend failure this was. That one
+    # success and otherwise names which failure this was. That one
     # value decides both whether a retry is safe and what the 502 says, so
     # "refused" and "silent" can never drift apart again.
     #
@@ -355,8 +362,8 @@ module Yamine
       begin
         backend = dial(entry)
       rescue SystemCallError => e
-        @on_error.call("dial failed for #{entry["hostname"]}: #{e.message}")
-        return [:close, :refused]
+        @on_error.call("dial failed for #{entry["hostname"]}: #{e.class}: #{e.message}")
+        return [:close, failure_reason(e)]
       end
 
       begin
@@ -370,15 +377,29 @@ module Yamine
       end
     end
 
+    # What a failed dial means. ECONNREFUSED is the one failure that
+    # indicts the backend; the rest indict the path or the proxy itself,
+    # and reporting them as "Nothing is listening" sends the reader off to
+    # restart an app that is perfectly fine — an fd-exhausted proxy spent
+    # one whole debugging evening dressed as a dead backend.
+    def failure_reason(error)
+      case error
+      when Errno::ECONNREFUSED then :refused
+      when Errno::EMFILE, Errno::ENFILE then :exhausted
+      else :unreachable
+      end
+    end
+
     # A refused dial never reached the app, so any method replays safely —
     # the request body is still unread on the client socket. A head
-    # timeout means the head DID reach the app, so the only safe replays
-    # are the bodiless methods: the body has already been consumed off the
-    # client socket and cannot be faithfully resent, and a duplicated
-    # message is a worse outcome than a slow page.
+    # timeout or an exhausted proxy means the attempt died on our side of
+    # the wire, so the only safe replays are the bodiless methods: the
+    # body has already been consumed off the client socket and cannot be
+    # faithfully resent, and a duplicated message is a worse outcome than
+    # a slow page.
     def retriable?(reason, method, headers)
       return true if reason == :refused
-      return false unless reason == :silent
+      return false unless [:silent, :exhausted].include?(reason)
       return false unless %w[GET HEAD OPTIONS].include?(method.to_s.upcase)
 
       request_body_length(headers) == 0
@@ -413,17 +434,43 @@ module Yamine
       return [:close, :gone] if rhead.nil?
 
       _rm, _rt, rheaders = parse_head(rhead)
-      write_all(sock, rhead)
-      write_all(sock, rbuf) unless rbuf.empty?
+      relay_after_head(sock, backend, rhead, rbuf, rheaders, headers, target)
+    end
 
-      rlen = content_length(rheaders)
-      if rlen.nil?
-        # No Content-Length: close-delimited response.
-        copy_stream(backend, sock)
-        return [:close, nil]
+    # Everything from the response head onward. Once the head is on the
+    # wire the 502 vocabulary is spent: a failure here can only end the
+    # connection, never answer it, and rendering a 502 into the middle of
+    # a live 200 corrupts the stream the browser is already reading (the
+    # second head arrives as body bytes; the page dies of it with no
+    # error naming anything). [:close, :body_lost] tells handle to close
+    # quietly instead — the stall itself is logged with the request that
+    # died, since a relay that goes quiet mid-body is exactly the failure
+    # that is otherwise invisible.
+    def relay_after_head(sock, backend, rhead, rbuf, rheaders, headers, target)
+      begin
+        write_all(sock, rhead)
+        write_all(sock, rbuf) unless rbuf.empty?
+
+        rlen = content_length(rheaders)
+        if rlen.nil?
+          # No Content-Length: close-delimited response.
+          copy_stream(backend, sock)
+          return [:close, nil]
+        end
+        remaining = rlen - rbuf.bytesize
+        copy_stream(backend, sock, remaining) if remaining > 0
+      rescue EOFError
+        @on_error.call("backend for #{headers["host"]}#{target} closed mid-body, " \
+                       "before its Content-Length of #{rheaders["content-length"]} was met")
+        return [:close, :body_lost]
+      rescue IdleTimeout => e
+        @on_error.call("response for #{headers["host"]}#{target} died mid-body: #{e.message}")
+        return [:close, :body_lost]
+      rescue IOError, SystemCallError
+        # The client or the backend hung up mid-relay — ordinary web
+        # traffic (a cancelled fetch, a departed tab), not a failure.
+        return [:close, :body_lost]
       end
-      remaining = rlen - rbuf.bytesize
-      copy_stream(backend, sock, remaining) if remaining > 0
 
       if keep_alive?(headers) && keep_alive?(rheaders)
         # Any bytes beyond Content-Length on the backend are a second
@@ -783,8 +830,7 @@ module Yamine
     # command to run. Modeled on render_not_found, which already answers
     # "nobody knows what this hostname is" properly.
     def render_bad_gateway(sock, entry, host, reason = :refused)
-      kind = reason == :silent ? "backend-silent" : "backend-refused"
-      headers = { ERROR_HEADER => kind }
+      headers = { ERROR_HEADER => error_kind(reason) }
       bare = Hostname.strip_port(host)
       # Same DNS-rebinding boundary as render_not_found: a Host outside our
       # TLDs is a website that got us to answer, not the local developer
@@ -793,16 +839,31 @@ module Yamine
 
       target = entry ? entry["target"].to_s : ""
       body = "<h1>Bad Gateway</h1><p>#{what_happened(reason, target)}</p>" \
-             "#{bad_gateway_owner(entry, bare)}#{bad_gateway_fix(entry)}"
+             "#{bad_gateway_owner(entry, bare)}#{bad_gateway_fix(entry, reason)}"
       respond(sock, 502, body, headers: headers)
     rescue IOError, SystemCallError
       nil
     end
 
-    # Which of the two failures this was, said the way each one has to be
-    # read: not listening means start the app, silent means go find out why
-    # an app that is up is not answering. One "not responding" for both
-    # sends the reader to the wrong place either way.
+    # The machine-readable failure class. Agents branch on this without
+    # parsing the page, so each failure must carry its own name — a closed
+    # connection labeled "refused", or a proxy out of file descriptors
+    # labeled "refused", points the reader at the app when the app is fine.
+    def error_kind(reason)
+      case reason
+      when :silent then "backend-silent"
+      when :gone then "backend-gone"
+      when :exhausted then "proxy-exhausted"
+      when :unreachable then "proxy-unreachable"
+      else "backend-refused"
+      end
+    end
+
+    # Which of the failures this was, said the way each one has to be
+    # read: not listening means start the app, silent means go find out
+    # why an app that is up is not answering, exhausted means the trouble
+    # is the proxy's own resource limit. One "not responding" for all of
+    # them sends the reader to the wrong place every time.
     def what_happened(reason, target)
       at = target.empty? ? "" : " at <code>#{escape(target)}</code>"
       case reason
@@ -812,6 +873,12 @@ module Yamine
       when :gone
         "The backend#{at} accepted the connection, then closed it without " \
           "sending a response."
+      when :exhausted
+        "The proxy ran out of file descriptors dialing#{at} — the limit is the " \
+          "proxy process's own, not the app's, and the backend may be perfectly fine."
+      when :unreachable
+        "The proxy could not reach the backend#{at} — the address is wrong or the " \
+          "path there failed, which is not the same as nothing listening."
       else
         "Nothing is listening#{at}."
       end
@@ -832,7 +899,14 @@ module Yamine
       "<p>The backend for <strong>#{escape(host)}</strong> is registered#{by}#{where}.</p>"
     end
 
-    def bad_gateway_fix(entry)
+    def bad_gateway_fix(entry, reason)
+      if [:exhausted, :unreachable].include?(reason)
+        # The app is not the suspect here, so the start command would be
+        # the wrong advice on a page that already says so.
+        return "<p>The backend looks up — check the proxy's own log: " \
+               "<code>proxy.log</code> in the yamine state dir.</p>"
+      end
+
       dir = entry&.dig("spec", "dir")
       return "<p>Start it with <code>yamine start</code> in that app's directory.</p>" unless dir
 
