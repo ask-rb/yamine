@@ -64,6 +64,7 @@ module Yamine
     # which is also the only one a retry can be safe for.
     HeadTimeout = Class.new(IdleTimeout)
     CHUNK_BYTES = 16_384
+    CRLF = "\r\n"
     # Route cache: routes.json is the source of truth, but re-reading
     # and re-parsing it on every request is wasteful under HMR polling.
     # Keyed on file mtime, so a freshly registered route is visible on
@@ -449,16 +450,26 @@ module Yamine
     def relay_after_head(sock, backend, rhead, rbuf, rheaders, headers, target)
       begin
         write_all(sock, rhead)
-        write_all(sock, rbuf) unless rbuf.empty?
 
         rlen = content_length(rheaders)
-        if rlen.nil?
-          # No Content-Length: close-delimited response.
-          copy_stream(backend, sock)
-          return [:close, nil]
+        if chunked?(rheaders)
+          # The chunk relay reads the framing to find where the body ends,
+          # so it takes the read-ahead itself — handing it bytes already on
+          # the wire would send the body twice.
+          relay_chunked(backend, sock, rbuf)
+        else
+          write_all(sock, rbuf) unless rbuf.empty?
+
+          if rlen.nil?
+            # No Content-Length and no chunk framing: the body really does
+            # end at end of file, because the backend is closing to say so.
+            copy_stream(backend, sock)
+            return [:close, nil]
+          else
+            remaining = rlen - rbuf.bytesize
+            copy_stream(backend, sock, remaining) if remaining > 0
+          end
         end
-        remaining = rlen - rbuf.bytesize
-        copy_stream(backend, sock, remaining) if remaining > 0
       rescue EOFError
         @on_error.call("backend for #{headers["host"]}#{target} closed mid-body, " \
                        "before its Content-Length of #{rheaders["content-length"]} was met")
@@ -486,8 +497,13 @@ module Yamine
       return if rhead.nil?
 
       write_all(sock, rhead)
-      write_all(sock, rbuf) unless rbuf.empty?
-      copy_stream(backend, sock)
+      _rm, _rt, rheaders = parse_head(rhead)
+      if chunked?(rheaders)
+        relay_chunked(backend, sock, rbuf)
+      else
+        write_all(sock, rbuf) unless rbuf.empty?
+        copy_stream(backend, sock)
+      end
     rescue IOError, SystemCallError
       nil
     end
@@ -650,6 +666,79 @@ module Yamine
         write_all(dst, data)
         remaining -= data.bytesize unless remaining.nil?
       end
+    end
+
+    # Chunked framing is the one body the proxy has to read rather than
+    # copy, because it is the only thing that says where the body ends. It
+    # ends at the terminating chunk — not at end of file, and the backend
+    # holding the connection open past it is keep-alive doing exactly what
+    # it promised. Every streamed page, every ActionController::Live
+    # response and every event stream is framed this way.
+    #
+    # Bytes cross to the client exactly as the backend wrote them; only the
+    # framing is read, never rewritten. `buf` is the read-ahead already
+    # past the response head.
+    def relay_chunked(src, dst, buf)
+      loop do
+        line = take_line(src, buf)
+        return if line.nil?
+
+        write_all(dst, line)
+        size = chunk_size(line)
+        if size.zero?
+          relay_trailers(src, dst, buf)
+          return
+        end
+
+        write_all(dst, take_bytes(src, buf, size) || +"")
+        write_all(dst, take_line(src, buf) || +"")
+      end
+    end
+
+    # Trailers run to the blank line that closes them.
+    def relay_trailers(src, dst, buf)
+      loop do
+        line = take_line(src, buf)
+        return if line.nil?
+
+        write_all(dst, line)
+        return if line == CRLF
+      end
+    end
+
+    # A chunk-size line, less the CRLF that ends it. Extensions after a
+    # semicolon are the sender's and are not ours to weigh.
+    def chunk_size(line)
+      line.split(";", 2).first.to_s.strip.to_i(16)
+    end
+
+    def take_line(sock, buf)
+      until (index = buf.index(CRLF))
+        return nil unless fill_buf(sock, buf)
+      end
+      buf.slice!(0, index + 2)
+    end
+
+    def take_bytes(sock, buf, count)
+      out = +""
+      while out.bytesize < count
+        return nil if buf.empty? && !fill_buf(sock, buf)
+
+        take = [count - out.bytesize, buf.bytesize].min
+        out << buf.slice!(0, take)
+      end
+      out
+    end
+
+    def fill_buf(sock, buf)
+      buf << read_chunk(sock, CHUNK_BYTES)
+      true
+    rescue EOFError
+      false
+    end
+
+    def chunked?(headers)
+      headers["transfer-encoding"].to_s.downcase.include?("chunked")
     end
 
     # Block until the socket is ready for the direction a nonblocking op

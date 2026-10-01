@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-10-02
+
+### Fixed
+
+- **A chunked response now ends at its terminator instead of at end of
+  file.** The relay had one way to end a body with no Content-Length —
+  copy until the backend hung up — and it read every such body as
+  close-delimited. But a chunked body ends at its terminating chunk, and
+  the backend holding the connection open past it is keep-alive doing
+  exactly what it promised. So the relay blocked for the whole idle
+  bound, sixty seconds by default, with the client's connection pinned
+  the entire time. Every streamed page, every ActionController::Live
+  response and every event stream is framed this way, and the request
+  that followed on that connection — typically the page's main
+  JavaScript chunk — got nothing back until the connection was reaped.
+  A load test could not see it, because every request in one opened its
+  own connection. Chunked framing is now read rather than assumed, bytes
+  still cross to the client exactly as the backend wrote them, and the
+  connection is free for the next request the moment the terminator
+  arrives.
+- `minitest/mock` is required by the test helper, so `Object#stub` is
+  available to every test rather than only the ones that load it.
+
 ## [0.23.0] - 2026-10-02
 
 ### Fixed

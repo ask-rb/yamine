@@ -4,6 +4,7 @@ $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 
 require "yamine"
 require "minitest/autorun"
+require "minitest/mock"
 require "mocha/minitest"
 require "tmpdir"
 require "fileutils"
